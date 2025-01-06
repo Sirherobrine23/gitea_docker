@@ -6,7 +6,7 @@ ARG DEBIAN_FRONTEND="noninteractive"
 RUN apt update && apt install -y git
 WORKDIR /source
 ADD https://api.github.com/repos/go-gitea/gitea/compare/main...HEAD /dev/null
-RUN git clone https://sirherobrine23.com.br/gitea/gitea.git ./
+RUN git clone https://github.com/go-gitea/gitea.git ./
 
 # Build frontend
 FROM --platform=$BUILDPLATFORM node:22 AS front
