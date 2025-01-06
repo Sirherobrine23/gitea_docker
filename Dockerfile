@@ -1,8 +1,12 @@
 # syntax=docker/dockerfile:1
 # This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
 # Pull code
-FROM --platform=$BUILDPLATFORM scratch AS pull
-ADD --keep-git-dir=true https://sirherobrine23.com.br/gitea/gitea.git /
+FROM --platform=$BUILDPLATFORM debian:sid AS pull
+ARG DEBIAN_FRONTEND="noninteractive"
+RUN apt update && apt install -y git
+WORKDIR /source
+ADD https://api.github.com/repos/go-gitea/gitea/compare/main...HEAD /dev/null
+RUN git clone https://sirherobrine23.com.br/gitea/gitea.git ./
 
 # Build frontend
 FROM --platform=$BUILDPLATFORM node:22 AS front
@@ -11,11 +15,11 @@ RUN apt update && apt install -y curl wget make
 
 # Download packages
 WORKDIR /build
-COPY --from=pull /package.json /package-lock.json ./
+COPY --from=pull /source/package.json /source/package-lock.json ./
 RUN npm install
 
 # Copy source and build frontend
-COPY --from=pull / ./
+COPY --from=pull /source ./
 RUN make frontend
 
 # Build gitea final file
@@ -27,7 +31,7 @@ RUN apt update && apt install -y curl wget make
 
 # Copy go mod and download mods
 WORKDIR /build
-COPY --from=pull /go.mod /go.sum ./
+COPY --from=pull /source/go.mod /source/go.sum ./
 RUN go mod download
 
 # Copy source
