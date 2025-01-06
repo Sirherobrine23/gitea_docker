@@ -29,6 +29,8 @@ jobs:
       - name: Build and push
         uses: docker/build-push-action@v6
         with:
+          context: .
           push: true
           platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
-          tags: sirherobrine23.com.br/sirherobrine23/gitea:latest
+          cache-from: sirherobrine23.com.br/gitea/gitea:latest
+          tags: sirherobrine23.com.br/gitea/gitea:latest
