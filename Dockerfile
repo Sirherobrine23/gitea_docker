@@ -1,8 +1,8 @@
-# syntax=docker/dockerfile:latest
 # This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
 # Pull code
 FROM --platform=$BUILDPLATFORM scratch AS pull
-ADD --keep-git-dir=true https://sirherobrine23.com.br/gitea/gitea.git /
+ARG GIT_HASH=master
+ADD --keep-git-dir=true https://sirherobrine23.com.br/gitea/gitea.git#${GIT_HASH} /
 
 # Build frontend
 FROM --platform=$BUILDPLATFORM node:22 AS front
@@ -53,6 +53,7 @@ RUN apt update && \
 COPY --from=backend /build/gitea /usr/bin/gitea
 
 # Setup gitea
+LABEL "br.com.sirherobrine23.gitea.hash"=${GIT_HASH}
 USER git
 VOLUME ["/data"]
 WORKDIR /data

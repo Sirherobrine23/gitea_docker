@@ -6,9 +6,29 @@ on:
     - cron: 0 0/6 * * *
 
 jobs:
-  build:
+  check-release:
     runs-on: ubuntu-latest
-    name: Build docker
+    name: Check if image released
+    outputs:
+      skip: ${{ steps.checker.outputs.skip }}
+      git_hash: ${{ steps.checker.outputs.git_hash }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - uses: actions/setup-go@v4
+        with:
+          go-version-file: "go.mod"
+          cache: true
+
+      - id: checker
+        uses: https://sirherobrine23.com.br/gitea/gitea_docker@main
+
+  main:
+    runs-on: ubuntu-latest
+    name: Build main docker image
+    needs: [ check-release ]
+    if: needs.check-release.outputs.skip == '1'
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -34,3 +54,4 @@ jobs:
           platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
           cache-from: sirherobrine23.com.br/gitea/gitea:latest
           tags: sirherobrine23.com.br/gitea/gitea:latest
+          build-args: GIT_HASH=${{needs.check-release.outputs.git_hash}}

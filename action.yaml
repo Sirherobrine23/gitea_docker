@@ -1,0 +1,10 @@
+name: 'check for release'
+description: 'Check if releases docker image'
+outputs:
+  skip:
+    description: 'skip builder'
+  git_hash:
+    description: "gitea git hash"
+runs:
+  using: 'go'
+  main: 'main.go'
