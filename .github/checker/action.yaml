@@ -3,6 +3,8 @@ description: 'Check if releases docker image'
 outputs:
   skip:
     description: 'skip builder'
+  docker_tag:
+    description: "docker tag"
   git_hash:
     description: "gitea git hash"
 runs:

@@ -3,15 +3,16 @@ on:
   push:
   workflow_dispatch:
   schedule:
-    - cron: 0 0/6 * * *
+    - cron: 0 0/2 * * *
 
 jobs:
   check-release:
     runs-on: ubuntu-latest
     name: Check if image released
     outputs:
-      skip: ${{ steps.checker.outputs.skip }}
+      docker_tag: ${{ steps.checker.outputs.docker_tag }}
       git_hash: ${{ steps.checker.outputs.git_hash }}
+      skip: ${{ steps.checker.outputs.skip }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -24,7 +25,7 @@ jobs:
       - id: checker
         uses: ./.github/checker
 
-  main:
+  main-build:
     runs-on: ubuntu-latest
     name: Build main docker image
     needs: [ check-release ]
@@ -52,6 +53,5 @@ jobs:
           context: .
           push: true
           platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
-          cache-from: sirherobrine23.com.br/gitea/gitea:latest
-          tags: sirherobrine23.com.br/gitea/gitea:latest
+          tags: sirherobrine23.com.br/gitea/gitea:${{needs.check-release.outputs.docker_tag}}
           build-args: GIT_HASH=${{needs.check-release.outputs.git_hash}}
