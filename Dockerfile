@@ -33,7 +33,8 @@ RUN go mod download
 # Copy source
 COPY --from=front /build /build
 ARG TARGETOS TARGETARCH TARGETVARIANT
-RUN TAGS="bindata timetzdata" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
+ARG GIT_HASH=main
+RUN TAGS="bindata timetzdata" GITEA_VERSION="${GIT_HASH}" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
 
 # Latest image
 FROM debian:sid
