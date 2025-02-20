@@ -18,17 +18,17 @@ jobs:
 
       - uses: actions/setup-go@v4
         with:
-          go-version-file: "go.mod"
+          go-version-file: "./.github/checker/go.mod"
           cache: true
 
       - id: checker
-        uses: https://sirherobrine23.com.br/gitea/gitea_docker@main
+        uses: ./.github/checker
 
   main:
     runs-on: ubuntu-latest
     name: Build main docker image
     needs: [ check-release ]
-    if: needs.check-release.outputs.skip == '1'
+    if: needs.check-release.outputs.skip == '0'
     steps:
       - name: Checkout code
         uses: actions/checkout@v3

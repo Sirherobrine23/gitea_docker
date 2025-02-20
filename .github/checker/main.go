@@ -63,10 +63,9 @@ func main() {
 	if gitHash.Commit.SHA != hash {
 		fmt.Printf("New docker image build, %q => %q\n", hash, gitHash.Commit.SHA)
 		gha.SetOutput("git_hash", gitHash.Commit.SHA)
+		gha.SetOutput("skip", "0")
+	} else {
+		fmt.Println("Skiping docker image build, ared published")
 		gha.SetOutput("skip", "1")
-		return
 	}
-
-	fmt.Println("Skiping docker image build, ared published")
-	gha.SetOutput("skip", "0")
 }
