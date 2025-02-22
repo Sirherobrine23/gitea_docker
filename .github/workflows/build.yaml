@@ -10,9 +10,17 @@ jobs:
     runs-on: ubuntu-latest
     name: Check if image released
     outputs:
-      docker_tag: ${{ steps.checker.outputs.docker_tag }}
-      git_hash: ${{ steps.checker.outputs.git_hash }}
-      skip: ${{ steps.checker.outputs.skip }}
+      LATEST_SKIP: ${{ steps.checker.outputs.LATEST_SKIP }}
+      RELEASE_SKIP: ${{ steps.checker.outputs.RELEASE_SKIP }}
+      # -----
+      LATEST_DOCKER_TAG: ${{ steps.checker.outputs.LATEST_DOCKER_TAG }}
+      RELEASE_DOCKER_TAG: ${{ steps.checker.outputs.RELEASE_DOCKER_TAG }}
+      # -----
+      LATEST_GIT_VERSION: ${{ steps.checker.outputs.LATEST_GIT_VERSION }}
+      RELEASE_GIT_VERSION: ${{ steps.checker.outputs.RELEASE_GIT_VERSION }}
+      # -----
+      LATEST_GITEA_VERSION: ${{ steps.checker.outputs.LATEST_GITEA_VERSION }}
+      RELEASE_GITEA_VERSION: ${{ steps.checker.outputs.RELEASE_GITEA_VERSION }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -22,36 +30,34 @@ jobs:
           go-version-file: "./.github/checker/go.mod"
           cache: true
 
-      - id: checker
+      - name: Release check
+        id: checker
         uses: ./.github/checker
 
   main-build:
     runs-on: ubuntu-latest
     name: Build main docker image
     needs: [ check-release ]
-    if: needs.check-release.outputs.skip == '0'
+    if: needs.check-release.outputs.LATEST_SKIP == '0'
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+      - uses: "./.github/workflows/call"
+        secrets: inherit
         with:
-          registry: sirherobrine23.com.br
-          password: ${{ secrets.DOCKER_TOKEN }}
-          username: sirherobrine23
+          GITEA_TAG: ${{ needs.check-release.outputs.LATEST_GIT_VERSION }}
+          DOCKER_TAG: ${{ needs.check-release.outputs.LATEST_DOCKER_TAG }}
+          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+          GITEA_VERSION: ${{ needs.check-release.outputs.LATEST_GITEA_VERSION }}
 
-      - name: Setup qemu
-        uses: docker/setup-qemu-action@v3
-
-      - name: Setup buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Build and push
-        uses: docker/build-push-action@v6
+  release-build:
+    runs-on: ubuntu-latest
+    name: Build release docker image
+    needs: [ check-release ]
+    if: needs.check-release.outputs.RELEASE_SKIP == '0'
+    steps:
+      - uses: "./.github/workflows/call"
+        secrets: inherit
         with:
-          context: .
-          push: true
-          platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
-          tags: sirherobrine23.com.br/gitea/gitea:${{needs.check-release.outputs.docker_tag}}
-          build-args: GIT_HASH=${{needs.check-release.outputs.git_hash}}
+          GITEA_TAG: ${{ needs.check-release.outputs.RELEASE_GIT_VERSION }}
+          DOCKER_TAG: ${{ needs.check-release.outputs.RELEASE_DOCKER_TAG }}
+          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+          GITEA_VERSION: ${{ needs.check-release.outputs.RELEASE_GITEA_VERSION }}

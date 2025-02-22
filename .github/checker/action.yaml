@@ -1,12 +1,22 @@
-name: 'check for release'
-description: 'Check if releases docker image'
+name: "check for release"
+description: "Check if releases docker image"
 outputs:
-  skip:
-    description: 'skip builder'
-  docker_tag:
-    description: "docker tag"
-  git_hash:
-    description: "gitea git hash"
+  RELEASE_SKIP:
+    description: "config to dockerfile"
+  RELEASE_DOCKER_TAG:
+    description: "config to dockerfile"
+  RELEASE_GIT_VERSION:
+    description: "config to dockerfile"
+  RELEASE_GITEA_VERSION:
+    description: "config to dockerfile"
+  LATEST_SKIP:
+    description: "config to dockerfile"
+  LATEST_DOCKER_TAG:
+    description: "config to dockerfile"
+  LATEST_GIT_VERSION:
+    description: "config to dockerfile"
+  LATEST_GITEA_VERSION:
+    description: "config to dockerfile"
 runs:
-  using: 'go'
-  main: 'main.go'
+  using: "go"
+  main: "main.go"

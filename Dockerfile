@@ -1,8 +1,8 @@
 # This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
 # Pull code
 FROM --platform=$BUILDPLATFORM scratch AS pull
-ARG GIT_HASH=main
-ADD --keep-git-dir=true https://sirherobrine23.com.br/gitea/gitea.git#${GIT_HASH} /
+ARG GITEA_TAG="main" GITEA_REPO="https://github.com/go-gitea/gitea.git"
+ADD --keep-git-dir=true ${GITEA_REPO}#${GITEA_TAG} /
 
 # Build frontend
 FROM --platform=$BUILDPLATFORM node:22 AS front
@@ -32,9 +32,8 @@ RUN go mod download
 
 # Copy source
 COPY --from=front /build /build
-ARG TARGETOS TARGETARCH TARGETVARIANT
-ARG GIT_HASH=main
-RUN TAGS="bindata timetzdata" GITEA_VERSION="${GIT_HASH}" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
+ARG TARGETOS TARGETARCH TARGETVARIANT GITEA_VERSION
+RUN TAGS="bindata timetzdata" GITEA_VERSION=$GITEA_VERSION GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
 
 # Latest image
 FROM debian:sid
