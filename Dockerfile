@@ -53,8 +53,8 @@ RUN apt update && \
 COPY --from=backend /build/gitea /usr/bin/gitea
 
 # Setup gitea
-ARG GIT_HASH=main
-LABEL "br.com.sirherobrine23.gitea.hash"=${GIT_HASH}
+ARG GITEA_VERSION=main
+LABEL "br.com.sirherobrine23.gitea.hash"=${GITEA_VERSION}
 USER git
 VOLUME ["/data"]
 WORKDIR /data
