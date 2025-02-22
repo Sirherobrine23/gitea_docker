@@ -19,7 +19,7 @@ on:
         type: string
 
 jobs:
-  image-builder:
+  workflow_call:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout code

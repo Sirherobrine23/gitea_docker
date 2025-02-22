@@ -19,9 +19,7 @@ import (
 )
 
 var (
-	GiteaRepository = "https://github.com/go-gitea/gitea.git"
-	repositoryPath  = filepath.Join(os.TempDir(), "gitea")
-	Repository      *git.Repository
+	Repository *git.Repository
 
 	dockerClient *client.Client
 )
@@ -33,6 +31,13 @@ func init() {
 		fmt.Printf("Cannot connect to docker client: %s\n", err.Error())
 		os.Exit(1)
 		return
+	}
+
+	// Setup envs
+	repositoryPath := filepath.Join(os.TempDir(), "gitea")
+	GiteaRepository := os.Getenv("GITEA_REPO")
+	if GiteaRepository == "" {
+		GiteaRepository = "https://github.com/go-gitea/gitea.git"
 	}
 
 	fmt.Println("Cloning gitea repository ...")

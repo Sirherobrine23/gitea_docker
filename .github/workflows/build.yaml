@@ -33,31 +33,29 @@ jobs:
       - name: Release check
         id: checker
         uses: ./.github/checker
+        env:
+          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
 
   main-build:
-    runs-on: ubuntu-latest
-    name: Build main docker image
-    needs: [ check-release ]
     if: needs.check-release.outputs.LATEST_SKIP == '0'
-    steps:
-      - uses: "./.github/workflows/call"
-        secrets: inherit
-        with:
-          GITEA_TAG: ${{ needs.check-release.outputs.LATEST_GIT_VERSION }}
-          DOCKER_TAG: ${{ needs.check-release.outputs.LATEST_DOCKER_TAG }}
-          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
-          GITEA_VERSION: ${{ needs.check-release.outputs.LATEST_GITEA_VERSION }}
+    needs: [ check-release ]
+    name: Build main docker image
+    uses: "./.github/workflows/call.yaml"
+    secrets: inherit
+    with:
+      GITEA_TAG: ${{ needs.check-release.outputs.LATEST_GIT_VERSION }}
+      DOCKER_TAG: ${{ needs.check-release.outputs.LATEST_DOCKER_TAG }}
+      GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+      GITEA_VERSION: ${{ needs.check-release.outputs.LATEST_GITEA_VERSION }}
 
   release-build:
-    runs-on: ubuntu-latest
-    name: Build release docker image
-    needs: [ check-release ]
     if: needs.check-release.outputs.RELEASE_SKIP == '0'
-    steps:
-      - uses: "./.github/workflows/call"
-        secrets: inherit
-        with:
-          GITEA_TAG: ${{ needs.check-release.outputs.RELEASE_GIT_VERSION }}
-          DOCKER_TAG: ${{ needs.check-release.outputs.RELEASE_DOCKER_TAG }}
-          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
-          GITEA_VERSION: ${{ needs.check-release.outputs.RELEASE_GITEA_VERSION }}
+    needs: [ check-release ]
+    name: Build release docker image
+    uses: "./.github/workflows/call.yaml"
+    secrets: inherit
+    with:
+      GITEA_TAG: ${{ needs.check-release.outputs.RELEASE_GIT_VERSION }}
+      DOCKER_TAG: ${{ needs.check-release.outputs.RELEASE_DOCKER_TAG }}
+      GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+      GITEA_VERSION: ${{ needs.check-release.outputs.RELEASE_GITEA_VERSION }}
