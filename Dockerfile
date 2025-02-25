@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
 # Pull code
 FROM --platform=$BUILDPLATFORM scratch AS pull
@@ -32,6 +33,7 @@ RUN go mod download
 
 # Copy source
 COPY --from=front /build /build
+RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch
 ARG TARGETOS TARGETARCH TARGETVARIANT GITEA_VERSION
 RUN TAGS="bindata timetzdata" GITEA_VERSION=$GITEA_VERSION GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
 
