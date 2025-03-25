@@ -37,7 +37,7 @@ jobs:
           GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
 
   main-build:
-    if: needs.check-release.outputs.LATEST_SKIP == '0'
+    if: needs.check-release.outputs.RELEASE_SKIP != '0' && needs.check-release.outputs.LATEST_SKIP == '0'
     needs: [ check-release ]
     name: Build main docker image
     uses: "./.github/workflows/call.yaml"
