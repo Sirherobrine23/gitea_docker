@@ -5,42 +5,36 @@ FROM --platform=$BUILDPLATFORM scratch AS pull
 ARG GITEA_TAG="main" GITEA_REPO="https://github.com/go-gitea/gitea.git"
 ADD --keep-git-dir=true ${GITEA_REPO}#${GITEA_TAG} /
 
-# Build frontend
-FROM --platform=$BUILDPLATFORM node:22 AS front
+# Base to build gitea
+FROM --platform=$BUILDPLATFORM debian:sid AS debian_base
 ARG DEBIAN_FRONTEND="noninteractive"
-RUN apt update && apt install -y curl wget make
+RUN <<EOF
+set -e
+apt update
+apt install -y golang git wget curl make
 
-# Download packages
+# Install NodeJS
+curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+apt install -y nodejs
+EOF
+
+# Copy go mod and node package and download
 WORKDIR /build
-COPY --from=pull /package.json /package-lock.json ./
-RUN npm install
+COPY --from=pull /package.json /package-lock.json /go.mod /go.sum ./
+RUN npm install && go mod download
 
-# Copy source and build frontend
+# Copy code
 COPY --from=pull / ./
+RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch
 RUN make frontend
 
-# Build gitea final file
-FROM --platform=$BUILDPLATFORM golang:latest AS backend
-
-# Install tools to build gitea binary
-ARG DEBIAN_FRONTEND="noninteractive"
-RUN apt update && apt install -y curl wget make
-
-# Copy go mod and download mods
-WORKDIR /build
-COPY --from=pull /go.mod /go.sum ./
-RUN go mod download
-
-# Copy source
-COPY --from=front /build /build
-RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch
-ARG TARGETOS TARGETARCH TARGETVARIANT GITEA_VERSION
-RUN TAGS="bindata timetzdata" GITEA_VERSION=$GITEA_VERSION GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
+# Build frontend and prepare go build
+FROM --platform=$BUILDPLATFORM debian_base AS backend
+ARG TARGETOS TARGETARCH TARGETVARIANT GITEA_VERSION TAGS
+RUN TAGS="bindata timetzdata $TAGS" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
 
 # Latest image
 FROM debian:sid
-
-# Install basic tools to gitea
 ARG DEBIAN_FRONTEND="noninteractive"
 RUN apt update && \
   apt install -y adduser && \
