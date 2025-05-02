@@ -66,7 +66,7 @@ func init() {
 }
 
 func PullAndReturnVersion(tag string) (string, error) {
-	tag = fmt.Sprintf("sirherobrine23.com.br/gitea/gitea:%s", strings.ToLower(tag))
+	tag = fmt.Sprintf("ghcr.io/sirherobrine23/gitea:%s", strings.ToLower(tag))
 	ctx := context.Background()
 
 	fmt.Printf("Downloading %s ...\n", tag)

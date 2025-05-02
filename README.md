@@ -11,7 +11,7 @@ This gitea build have base to run gitea, bases is `debian:sid`, installed softwa
 Docker:
 
 ```sh
-docker run --restart on-failure --pull always -d -v gitea_data:/data -p 3000:3000 sirherobrine23.com.br/gitea/gitea:latest
+docker run --restart on-failure --pull always -d -v gitea_data:/data -p 3000:3000 ghcr.io/sirherobrine23/gitea:latest
 ```
 
 Docker compose:
@@ -53,7 +53,7 @@ services:
   gitea:
     container_name: gitea
     restart: "always"
-    image: sirherobrine23.com.br/gitea/gitea:latest
+    image: ghcr.io/sirherobrine23/gitea:latest
     pull_policy: always
     depends_on:
       - db
