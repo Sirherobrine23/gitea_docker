@@ -1,12 +1,12 @@
 diff --git a/cmd/main.go b/cmd/main.go
-index 3b8a8a9311..b4aeb06f65 100644
+index 7251bd09a3..e83732bc52 100644
 --- a/cmd/main.go
 +++ b/cmd/main.go
-@@ -105,6 +105,7 @@ func prepareWorkPathAndCustomConf(action cli.ActionFunc) func(context.Context, *
+@@ -104,6 +104,7 @@ func prepareWorkPathAndCustomConf(action cli.ActionFunc) func(ctx *cli.Context)
  			}
  		}
  		setting.InitWorkPathAndCommonConfig(os.Getenv, args)
 +		setting.EnvironmentToConfig(setting.CfgProvider, os.Environ()) // Add config from env
- 		if cmd.Bool("help") || action == nil {
+ 		if ctx.Bool("help") || action == nil {
  			// the default behavior of "urfave/cli": "nil action" means "show help"
- 			return cmdHelp().Action(ctx, cmd)
+ 			return cmdHelp().Action(ctx)

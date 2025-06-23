@@ -25,7 +25,7 @@ RUN npm install && go mod download
 
 # Copy code
 COPY --from=pull / ./
-RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch
+RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch || git apply /tmp/build-context/old_add_env.patch
 RUN make frontend
 
 # Build frontend and prepare go build
