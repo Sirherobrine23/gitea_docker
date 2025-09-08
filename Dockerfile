@@ -14,14 +14,15 @@ apt update
 apt install -y golang git wget curl make
 
 # Install NodeJS
-curl -fsSL https://deb.nodesource.com/setup_22.x | bash -
+curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 apt install -y nodejs
+npm install -g pnpm@latest
 EOF
 
 # Copy go mod and node package and download
 WORKDIR /build
-COPY --from=pull /package.json /package-lock.json /go.mod /go.sum ./
-RUN npm install && go mod download
+COPY --from=pull /package.json /pnpm-lock.yaml /go.mod /go.sum ./
+RUN pnpm install && go mod download
 
 # Copy code
 COPY --from=pull / ./
