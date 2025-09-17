@@ -21,7 +21,7 @@ EOF
 
 # Copy go mod and node package and download
 WORKDIR /build
-COPY --from=pull /package.json /pnpm-lock.yaml /go.mod /go.sum ./
+COPY --from=pull /package.json /*-lock* /go.mod /go.sum ./
 RUN pnpm install && go mod download
 
 # Copy code
