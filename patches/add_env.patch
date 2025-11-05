@@ -2,7 +2,7 @@ diff --git a/cmd/main.go b/cmd/main.go
 index 3fdaf48ed9..3cfb66ee5d 100644
 --- a/cmd/main.go
 +++ b/cmd/main.go
-@@ -73,6 +73,7 @@ func prepareWorkPathAndCustomConf(cmd *cli.Command) {
+@@ -79,6 +79,7 @@ func prepareWorkPathAndCustomConf(cmd *cli.Command) {
  		args.CustomConf = cmd.String("config")
  	}
  	setting.InitWorkPathAndCommonConfig(os.Getenv, args)

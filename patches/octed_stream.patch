@@ -1,0 +1,33 @@
+diff --git a/routers/api/v1/repo/release_attachment.go b/routers/api/v1/repo/release_attachment.go
+index 43e97beb27..4b6dabf5c5 100644
+--- a/routers/api/v1/repo/release_attachment.go
++++ b/routers/api/v1/repo/release_attachment.go
+@@ -210,20 +210,25 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
+ 	// Get uploaded file from request
+ 	var filename string
+ 	var uploaderFile *attachment_service.UploaderFile
+-	if strings.HasPrefix(strings.ToLower(ctx.Req.Header.Get("Content-Type")), "multipart/form-data") {
++
++	switch bodyContentType := strings.ToLower(ctx.Req.Header.Get("Content-Type")); {
++	case strings.HasPrefix(bodyContentType, "multipart/form-data"):
+ 		file, header, err := ctx.Req.FormFile("attachment")
+ 		if err != nil {
+ 			ctx.APIErrorInternal(err)
+ 			return
+ 		}
+ 		defer file.Close()
+-
++	
+ 		filename = header.Filename
+ 		if name := ctx.FormString("name"); name != "" {
+ 			filename = name
+ 		}
+ 		uploaderFile = attachment_service.NewLimitedUploaderKnownSize(file, header.Size)
+-	} else {
++	case strings.HasPrefix(bodyContentType, "application/octet-stream"):
++		filename = ctx.Req.URL.Query().Get("name")
++		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
++	default:
+ 		filename = ctx.FormString("name")
+ 		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
+ 	}

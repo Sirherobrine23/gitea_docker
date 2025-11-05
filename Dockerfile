@@ -1,5 +1,6 @@
 # syntax=docker/dockerfile:1
-# This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7,linux/arm/v6
+# This image is to: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
+# debian dropped linux/arm/v6 maintence
 # Pull code
 FROM --platform=$BUILDPLATFORM scratch AS pull
 ARG GITEA_TAG="main" GITEA_REPO="https://github.com/go-gitea/gitea.git"
@@ -26,7 +27,9 @@ RUN pnpm install && go mod download
 
 # Copy code
 COPY --from=pull / ./
-RUN --mount=type=bind,source=./,target=/tmp/build-context git apply /tmp/build-context/add_env.patch || git apply /tmp/build-context/old_add_env.patch
+RUN --mount=type=bind,source=./patches/,target=/tmp/build-context \
+  (git apply /tmp/build-context/add_env.patch || git apply /tmp/build-context/old_add_env.patch); \
+  find /tmp/build-context -type f | grep -v add_env.patch | xargs -i{} git apply --ignore-whitespace "{}"
 RUN make frontend
 
 # Build frontend and prepare go build
