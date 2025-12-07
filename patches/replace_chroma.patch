@@ -1,5 +1,5 @@
 diff --git a/go.mod b/go.mod
-index 11ab491946..652f58a2db 100644
+index 11ab491946..d8a80ea26a 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -311,3 +311,5 @@ exclude github.com/goccy/go-json v0.4.11
@@ -7,17 +7,17 @@ index 11ab491946..652f58a2db 100644
  
  tool code.gitea.io/gitea-vet
 +
-+replace github.com/alecthomas/chroma/v2 => github.com/Sirherobrine23/chroma/v2 v2.0.0-20251204113532-cda965653c7b
++replace github.com/alecthomas/chroma/v2 => github.com/Sirherobrine23/chroma/v2 v2.0.0-20251207165043-d65b30a01e90
 diff --git a/go.sum b/go.sum
-index 29f5ba745f..83d79a9696 100644
+index 29f5ba745f..3b318e1d20 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -95,14 +95,13 @@ github.com/STARRY-S/zip v0.2.3 h1:luE4dMvRPDOWQdeDdUxUoZkzUIpTccdKdhHHsQJ1fm4=
  github.com/STARRY-S/zip v0.2.3/go.mod h1:lqJ9JdeRipyOQJrYSOtpNAiaesFO6zVDsE8GIGFaoSk=
  github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.8.0 h1:tgjwQrDH5m6jIYB7kac5IQZmfUzQNseac/e3H4VoCNE=
  github.com/SaveTheRbtz/zstd-seekable-format-go/pkg v0.8.0/go.mod h1:1HmmMEVsr+0R1QWahSeMJkjSkq6CYAZu1aIbYSpfJ4o=
-+github.com/Sirherobrine23/chroma/v2 v2.0.0-20251204113532-cda965653c7b h1:IYThjulVzzN5ffUEu3EmT3+qMpnGmJSr2oAKLyie+Uc=
-+github.com/Sirherobrine23/chroma/v2 v2.0.0-20251204113532-cda965653c7b/go.mod h1:NqVhfBR0lte5Ouh3DcthuUCTUpDC9cxBOfyMbMQPs3o=
++github.com/Sirherobrine23/chroma/v2 v2.0.0-20251207165043-d65b30a01e90 h1:/tmPSk9Zuxi66/joo3vty1e4XS4CKUpWsvlke/BRHYc=
++github.com/Sirherobrine23/chroma/v2 v2.0.0-20251207165043-d65b30a01e90/go.mod h1:NqVhfBR0lte5Ouh3DcthuUCTUpDC9cxBOfyMbMQPs3o=
  github.com/alecthomas/assert/v2 v2.11.0 h1:2Q9r3ki8+JYXvGsDyBXwH3LcJ+WK5D0gc5E8vS6K3D0=
  github.com/alecthomas/assert/v2 v2.11.0/go.mod h1:Bze95FyfUr7x34QZrjL+XP+0qgp/zg8yS+TtBj1WA3k=
 -github.com/alecthomas/chroma/v2 v2.2.0/go.mod h1:vf4zrexSH54oEjJ7EdB65tGNHmH3pGZmVkgTP5RHvAs=
