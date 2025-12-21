@@ -34,8 +34,8 @@ jobs:
         id: checker
         uses: ./.github/checker
         env:
-          GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
-
+          GITEA_REPO: "https://github.com/go-gitea/gitea.git"
+  
   main-build:
     if: needs.check-release.outputs.RELEASE_SKIP != '0' && needs.check-release.outputs.LATEST_SKIP == '0'
     needs: [ check-release ]
@@ -45,7 +45,7 @@ jobs:
     with:
       GITEA_TAG: ${{ needs.check-release.outputs.LATEST_GIT_VERSION }}
       DOCKER_TAG: ${{ needs.check-release.outputs.LATEST_DOCKER_TAG }}
-      GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+      GITEA_REPO: "https://github.com/go-gitea/gitea.git"
       GITEA_VERSION: ${{ needs.check-release.outputs.LATEST_GITEA_VERSION }}
 
   release-build:
@@ -57,5 +57,5 @@ jobs:
     with:
       GITEA_TAG: ${{ needs.check-release.outputs.RELEASE_GIT_VERSION }}
       DOCKER_TAG: ${{ needs.check-release.outputs.RELEASE_DOCKER_TAG }}
-      GITEA_REPO: "${{ github.server_url }}/${{ (github.server_url == 'https://github.com') && 'go-gitea' || 'gitea' }}/gitea.git"
+      GITEA_REPO: "https://github.com/go-gitea/gitea.git"
       GITEA_VERSION: ${{ needs.check-release.outputs.RELEASE_GITEA_VERSION }}
