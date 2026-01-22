@@ -38,7 +38,7 @@ ARG TARGETOS TARGETARCH TARGETVARIANT GITEA_VERSION TAGS
 RUN TAGS="bindata timetzdata $TAGS" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
 
 # Latest image
-FROM debian:sid
+FROM debian:stable
 ARG DEBIAN_FRONTEND="noninteractive"
 RUN apt update && \
   apt install -y adduser && \
