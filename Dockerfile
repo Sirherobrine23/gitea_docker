@@ -6,15 +6,32 @@ FROM --platform=$BUILDPLATFORM scratch AS pull
 ARG GITEA_TAG="main" GITEA_REPO="https://github.com/go-gitea/gitea.git"
 ADD --keep-git-dir=true ${GITEA_REPO}#${GITEA_TAG} /
 
-# Base to build gitea
-FROM --platform=$BUILDPLATFORM debian:sid AS debian_base
+FROM --platform=$BUILDPLATFORM scratch AS act_pull
+ADD --keep-git-dir=true https://gitea.com/gitea/act_runner.git#main /
+
+# Base system to build go
+FROM --platform=$BUILDPLATFORM debian:sid AS debian_sys
 ARG DEBIAN_FRONTEND="noninteractive"
 RUN <<EOF
 set -e
 apt update
 apt install -y golang git wget curl make
+EOF
+
+FROM --platform=$BUILDPLATFORM debian_sys AS act_sys
+WORKDIR /build
+COPY --from=act_pull /go.mod /go.sum ./
+RUN go mod download
+COPY --from=act_pull / ./
+
+FROM --platform=$BUILDPLATFORM act_sys AS act
+ARG TARGETOS TARGETARCH TARGETVARIANT
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make
 
 # Install NodeJS
+FROM --platform=$BUILDPLATFORM debian_sys AS debian_base
+RUN <<EOF
+set -e
 curl -fsSL https://deb.nodesource.com/setup_24.x | bash -
 apt install -y nodejs
 npm install -g pnpm@latest
@@ -51,6 +68,7 @@ RUN apt update && \
 
 # Copy gitea
 COPY --from=backend /build/gitea /usr/bin/gitea
+COPY --from=act /build/act_runner /usr/bin/act_runner
 
 # Setup gitea
 ARG GITEA_VERSION=main
