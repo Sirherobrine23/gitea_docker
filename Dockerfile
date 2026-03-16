@@ -15,7 +15,8 @@ ARG DEBIAN_FRONTEND="noninteractive"
 RUN <<EOF
 set -e
 apt update
-apt install -y golang git wget curl make
+apt install -y golang git wget curl make ca-certificates
+update-ca-certificates
 EOF
 
 FROM --platform=$BUILDPLATFORM debian_sys AS act_sys
