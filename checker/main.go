@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"github.com/go-git/go-git/v5"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
+	"golang.org/x/mod/semver"
 
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/client"
@@ -22,7 +24,15 @@ var (
 	Repository *git.Repository
 
 	dockerClient *client.Client
+
+	Releases map[string]*Output = map[string]*Output{}
 )
+
+type Output struct {
+	DockerTag    string `json:"DOCKER_TAG"`
+	GiteaTag     string `json:"GITEA_TAG"`
+	GiteaVersion string `json:"GITEA_VERSION"`
+}
 
 func init() {
 	fmt.Println("Creating docker client ...")
@@ -132,16 +142,27 @@ func LatestTag(devel bool) (*object.Commit, string, error) {
 	return commit, tagReference, nil
 }
 
-func setTargetInfo(skip bool, target, dockerTag, gitVersion, giteaVersion string) {
-	target = strings.ToUpper(target)
-	if skip {
-		gha.SetOutput(fmt.Sprintf("%s_SKIP", target), "1")
-		return
+func getDescribeLike(repo *git.Repository, head *plumbing.Reference) string {
+	tags, _ := repo.Tags()
+	var currentTag string
+
+	_ = tags.ForEach(func(t *plumbing.Reference) error {
+		if currentTag == "" {
+			currentTag = t.Name().Short()
+			return nil
+		}
+		if semver.Compare(t.Name().Short(), currentTag) >= 0 {
+			fmt.Println(currentTag, t.Name().Short())
+			currentTag = t.Name().Short()
+		}
+		return nil
+	})
+
+	if currentTag != "" {
+		return strings.TrimLeft(currentTag+"-"+head.Hash().String()[:7], "v")
 	}
-	gha.SetOutput(fmt.Sprintf("%s_SKIP", target), "0")
-	gha.SetOutput(fmt.Sprintf("%s_DOCKER_TAG", target), dockerTag)
-	gha.SetOutput(fmt.Sprintf("%s_GIT_VERSION", target), gitVersion)
-	gha.SetOutput(fmt.Sprintf("%s_GITEA_VERSION", target), giteaVersion)
+
+	return "main-" + head.Hash().String()[:7]
 }
 
 func main() {
@@ -160,19 +181,36 @@ func main() {
 		return
 	}
 
-	if hash, err := PullAndReturnVersion(tagRelease); err != nil || hash != "" {
-		fmt.Println("Dont have new tag release")
-		setTargetInfo(true, "release", "", "", "")
-	} else if hash == "" {
+	if hash, err := PullAndReturnVersion(tagRelease); err != nil || hash == "" {
 		fmt.Printf("New tag release: %q\n", tagRelease)
-		setTargetInfo(false, "release", tagRelease, tagRelease, tagRelease)
+		Releases["release"] = &Output{
+			DockerTag:    tagRelease,
+			GiteaTag:     tagRelease,
+			GiteaVersion: tagRelease,
+		}
 	}
 
-	if hash, err := PullAndReturnVersion("latest"); err != nil || hash == mainBranch.Hash().String() {
-		fmt.Println("No have new 'nightly' build")
-		setTargetInfo(true, "latest", "", "", "")
-	} else {
-		fmt.Printf("New nightly docker build, %q => %q\n", hash, mainBranch.Hash().String())
-		setTargetInfo(false, "latest", "latest", "main", mainBranch.Hash().String())
+	gitea_version := getDescribeLike(Repository, mainBranch)
+	if gitea_version == "" {
+		gitea_version = "main-nightly"
+	}
+
+	if hash, err := PullAndReturnVersion("latest"); !(err != nil || hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
+		fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
+		Releases["nightly"] = &Output{
+			DockerTag:    "latest",
+			GiteaTag:     "main",
+			GiteaVersion: gitea_version,
+		}
+	}
+
+	for key, value := range Releases {
+		data, err := json.Marshal(value)
+		if err != nil {
+			fmt.Printf("Error on set builds: %s\n", err.Error())
+			os.Exit(1)
+			return
+		}
+		gha.SetOutput(key, string(data))
 	}
 }

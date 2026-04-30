@@ -1,0 +1,197 @@
+From bd671c43cf5ec0a713065aa636da14e4cd9ca886 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Wed, 11 Feb 2026 11:47:39 -0300
+Subject: [PATCH 1/2] Add act-cache flag on daemon run
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ internal/app/cmd/cmd.go    | 1 +
+ internal/app/cmd/daemon.go | 9 ++++++++-
+ 2 files changed, 9 insertions(+), 1 deletion(-)
+
+diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
+index a964f614..97f1c1d3 100644
+--- a/internal/app/cmd/cmd.go
++++ b/internal/app/cmd/cmd.go
+@@ -50,6 +50,7 @@ func Execute(ctx context.Context) {
+ 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
+ 	}
+ 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
++	daemonCmd.Flags().StringVar(&daemArgs.ExternalCache, "external-cache", "", "External cache server")
+ 	rootCmd.AddCommand(daemonCmd)
+ 
+ 	// ./gitea-runner exec
+diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
+index aaac6401..2a84d265 100644
+--- a/internal/app/cmd/daemon.go
++++ b/internal/app/cmd/daemon.go
+@@ -38,6 +38,12 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ 			return fmt.Errorf("invalid configuration: %w", err)
+ 		}
+ 
++		if daemArgs.ExternalCache != "" {
++      enable := true
++      cfg.Cache.Enabled = &enable
++		  cfg.Cache.ExternalServer = daemArgs.ExternalCache
++		}
++
+ 		initLogging(cfg)
+ 		log.Infoln("Starting runner daemon")
+ 
+@@ -194,7 +200,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ }
+ 
+ type daemonArgs struct {
+-	Once bool
++	Once          bool
++	ExternalCache string
+ }
+ 
+ // initLogging setup the global logrus logger.
+-- 
+2.54.0
+
+
+From c56a57fe934162c4b6434d353cc3c6f2f12d7853 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Wed, 11 Feb 2026 17:28:54 -0300
+Subject: [PATCH 2/2] add more config to flags on daemon
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ internal/app/cmd/cache-server.go | 18 +++++++++++-------
+ internal/app/cmd/cmd.go          | 13 ++++++++++++-
+ internal/app/cmd/daemon.go       | 31 +++++++++++++++++++++++++------
+ 3 files changed, 48 insertions(+), 14 deletions(-)
+
+diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
+index 168fffef..19e7c362 100644
+--- a/internal/app/cmd/cache-server.go
++++ b/internal/app/cmd/cache-server.go
+@@ -17,9 +17,10 @@ import (
+ )
+ 
+ type cacheServerArgs struct {
+-	Dir  string
+-	Host string
+-	Port uint16
++	Dir    string
++	Host   string
++	Port   uint16
++	Secret string
+ }
+ 
+ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
+@@ -32,9 +33,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 		initLogging(cfg)
+ 
+ 		var (
+-			dir  = cfg.Cache.Dir
+-			host = cfg.Cache.Host
+-			port = cfg.Cache.Port
++			dir    = cfg.Cache.Dir
++			host   = cfg.Cache.Host
++			port   = cfg.Cache.Port
++			secret = cfg.Cache.ExternalSecret
+ 		)
+ 
+ 		// cacheArgs has higher priority
+@@ -44,11 +46,13 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 		if cacheArgs.Host != "" {
+ 			host = cacheArgs.Host
+ 		}
++		if cacheArgs.Secret != "" {
++			secret = cacheArgs.Secret
++		}
+ 		if cacheArgs.Port != 0 {
+ 			port = cacheArgs.Port
+ 		}
+ 
+-		secret := cfg.Cache.ExternalSecret
+ 		if secret == "" {
+ 			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
+ 		}
+diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
+index 97f1c1d3..ee18a66d 100644
+--- a/internal/app/cmd/cmd.go
++++ b/internal/app/cmd/cmd.go
+@@ -50,7 +50,17 @@ func Execute(ctx context.Context) {
+ 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
+ 	}
+ 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
+-	daemonCmd.Flags().StringVar(&daemArgs.ExternalCache, "external-cache", "", "External cache server")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalServer, "cache-external-cache", "", "External Server specifies the URL of external cache server")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-external-secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Host.WorkdirParent, "host-workdir-parent", "", "WorkdirParent specifies the parent directory for the host's working directory.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Network, "container-network", "", "Network specifies the network for the container.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Options, "container-options", "", "Options specifies additional options for the container.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.WorkdirParent, "container-workdir-parent", "", "WorkdirParent specifies the parent directory for the container's working directory.")
++	daemonCmd.Flags().DurationVar(&daemArgs.CommandLine.Container.DockerTimeout, "container-docker-timeout", 0, "Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or act_runner")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.Privileged, "container-privileged", false, "Privileged indicates whether the container runs in privileged mode.")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.ForcePull, "container-force-pull", false, "Pull docker image(s) even if already present")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.ForceRebuild, "container-force-rebuild", false, "Rebuild docker image(s) even if already present")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.RequireDocker, "container-require-docker", false, "Always require a reachable docker daemon, even if not required by act_runner")
+ 	rootCmd.AddCommand(daemonCmd)
+ 
+ 	// ./gitea-runner exec
+@@ -76,6 +86,7 @@ func Execute(ctx context.Context) {
+ 	}
+ 	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
+ 	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")
++	cacheCmd.Flags().StringVar(&cacheArgs.Secret, "secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
+ 	cacheCmd.Flags().Uint16VarP(&cacheArgs.Port, "port", "p", 0, "Port of the cache server")
+ 	rootCmd.AddCommand(cacheCmd)
+ 
+diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
+index 2a84d265..9d9c2028 100644
+--- a/internal/app/cmd/daemon.go
++++ b/internal/app/cmd/daemon.go
+@@ -38,11 +38,30 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ 			return fmt.Errorf("invalid configuration: %w", err)
+ 		}
+ 
+-		if daemArgs.ExternalCache != "" {
+-      enable := true
+-      cfg.Cache.Enabled = &enable
+-		  cfg.Cache.ExternalServer = daemArgs.ExternalCache
++		if daemArgs.CommandLine.Cache.ExternalServer != "" {
++			enable := true
++			cfg.Cache.Enabled = &enable
++			cfg.Cache.ExternalServer = daemArgs.CommandLine.Cache.ExternalServer
+ 		}
++		if daemArgs.CommandLine.Host.WorkdirParent != "" {
++			cfg.Host.WorkdirParent = daemArgs.CommandLine.Host.WorkdirParent
++		}
++		if daemArgs.CommandLine.Container.Network != "" {
++			cfg.Container.Network = daemArgs.CommandLine.Container.Network
++		}
++		if daemArgs.CommandLine.Container.Options != "" {
++			cfg.Container.Options = daemArgs.CommandLine.Container.Options
++		}
++		if daemArgs.CommandLine.Container.WorkdirParent != "" {
++			cfg.Container.WorkdirParent = daemArgs.CommandLine.Container.WorkdirParent
++		}
++		if daemArgs.CommandLine.Container.DockerTimeout > 0 {
++			cfg.Container.DockerTimeout = daemArgs.CommandLine.Container.DockerTimeout
++		}
++		cfg.Container.Privileged = daemArgs.CommandLine.Container.Privileged || cfg.Container.Privileged
++		cfg.Container.ForcePull = daemArgs.CommandLine.Container.ForcePull || cfg.Container.ForcePull
++		cfg.Container.ForceRebuild = daemArgs.CommandLine.Container.ForceRebuild || cfg.Container.ForceRebuild
++		cfg.Container.RequireDocker = daemArgs.CommandLine.Container.RequireDocker || cfg.Container.RequireDocker
+ 
+ 		initLogging(cfg)
+ 		log.Infoln("Starting runner daemon")
+@@ -200,8 +219,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ }
+ 
+ type daemonArgs struct {
+-	Once          bool
+-	ExternalCache string
++	Once        bool
++	CommandLine config.Config // replace config from command args
+ }
+ 
+ // initLogging setup the global logrus logger.
+-- 
+2.54.0
+
