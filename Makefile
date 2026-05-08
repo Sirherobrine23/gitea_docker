@@ -18,6 +18,7 @@ define runner_build_minimal
 	docker buildx build \
 		$(DOCKER_ARGS) \
 		-t $(RUNNER_TAG):minimal \
+		-t $(RUNNER_TAG):latest \
 		--platform $(MINIMAL_PLATFORM) \
 		--target minimal-runner .
 endef

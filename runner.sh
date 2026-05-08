@@ -28,7 +28,21 @@ if [[ $UID -eq 0 ]]; then
     fi
   done
 else
-  RUN_ARGS="${RUN_ARGS} --host-workdir-parent=/workspace"
+  # Force workspace only DOCKER_HOST not set or docker ps return error
+  if [[ -z "${DOCKER_HOST}" ]] || ! docker ps > /dev/null 2>&1; then
+    GITEA_RUNNER_WORKSPACE=${GITEA_RUNNER_WORKSPACE:-/workspace}
+    GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE=${GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE:-1}
+    
+    RUN_ARGS="${RUN_ARGS} --host-workdir-parent=$GITEA_RUNNER_WORKSPACE"
+    if [[ $GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE -eq 1 ]]; then
+      if [[ -d "$GITEA_RUNNER_WORKSPACE" ]]; then
+        sudo rm -rf "$GITEA_RUNNER_WORKSPACE"
+      fi
+      sudo mkdir -p "$GITEA_RUNNER_WORKSPACE"
+      sudo chmod 7777 "$GITEA_RUNNER_WORKSPACE"
+      sudo chown $UID:$(id -gn $UID) "$GITEA_RUNNER_WORKSPACE"
+    fi
+  fi
 fi
 
 RUNNER_STATE_FILE=${RUNNER_STATE_FILE:-'.runner'}
@@ -92,8 +106,10 @@ if [[ ! -s "$RUNNER_STATE_FILE" ]]; then
     rm /tmp/reg.log
   done
 fi
+
 # Prevent reading the token from the gitea-runner process
 unset GITEA_RUNNER_REGISTRATION_TOKEN
 unset GITEA_RUNNER_REGISTRATION_TOKEN_FILE
 
+# Move to runner bin
 exec gitea-runner daemon ${CONFIG_ARG} ${RUN_ARGS}

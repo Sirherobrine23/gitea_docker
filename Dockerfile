@@ -20,10 +20,13 @@ ARG DEBIAN_FRONTEND="noninteractive"
 RUN <<EOF
 set -e
 apt update
-apt install -y golang git wget curl make ca-certificates nodejs=24*
+apt install -y golang git wget curl make ca-certificates nodejs
 update-ca-certificates
-corepack enable pnpm
+corepack install -g npm
+corepack install -g pnpm
 corepack enable npm
+corepack enable pnpm
+npm install -g corepack --force
 pnpm -v
 npm -v
 EOF

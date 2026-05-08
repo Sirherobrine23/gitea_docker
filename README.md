@@ -57,7 +57,6 @@ services:
     pull_policy: always
     depends_on:
       - db
-      - redis
     env_file:
       - .env
     environment:
@@ -98,13 +97,21 @@ services:
         aliases:
           - postgres
 
-  # Start redis server
-  redis:
-    image: redis:latest
-    restart: always
-    mem_limit: 2000M
+  # Gitea runner
+  runner:
+    restart: "always"
+    image: ghcr.io/sirherobrine23/act_runner:latest
+    pull_policy: always
+    depends_on: [gitea]
+    environment:
+      GITEA_RUNNER_REGISTRATION_TOKEN: ${GITEA_RUNNER_TOKEN}
+      GITEA_INSTANCE_URL: http://gitea:3000
+    env_file:
+      - .env
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:rw
     networks:
       sh23_services:
-        ipv4_address: 10.4.0.4
-        ipv6_address: fd0f:df83:64a7::0004
+        ipv4_address: 10.4.0.5
+        ipv6_address: fd0f:df83:64a7::0005
 ```
