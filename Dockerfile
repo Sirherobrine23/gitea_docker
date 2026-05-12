@@ -51,8 +51,10 @@ RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make
 FROM base_sys AS gitea_builder_base
 # Copy go mod and node package and download
 WORKDIR /build
-COPY --from=gitea_code /package.json /*-lock* /go.mod /go.sum ./
-RUN pnpm install && go mod download
+COPY --from=gitea_code /go.mod /go.sum ./
+RUN go mod download
+COPY --from=gitea_code /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
+RUN pnpm install --no-frozen-lockfile
 # Copy code
 COPY --from=gitea_code / ./
 RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context \

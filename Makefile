@@ -9,6 +9,7 @@ DOCKER_ARGS ?=
 
 define gitea_build
 	docker buildx build \
+		$(DOCKER_ARGS) \
 		-t $(GITEA_TAG) \
 		--platform $(GITEA_PLATFORMS) \
 		--target gitea .
