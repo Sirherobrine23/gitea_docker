@@ -53,7 +53,8 @@ FROM base_sys AS gitea_builder_base
 WORKDIR /build
 COPY --from=gitea_code /go.mod /go.sum ./
 RUN go mod download
-COPY --from=gitea_code /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
+# COPY --from=gitea_code /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
+COPY --from=gitea_code /package.json /pnpm-*.yaml ./
 RUN pnpm install --no-frozen-lockfile
 # Copy code
 COPY --from=gitea_code / ./

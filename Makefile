@@ -2,16 +2,23 @@ GITEA_PLATFORMS ?= linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s39
 MINIMAL_PLATFORM ?= linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
 ROOTLESS_PLATFORM ?= linux/amd64,linux/arm64
 
-GITEA_TAG ?= ghcr.io/sirherobrine23/gitea:latest
+GITEA_TAG ?= ghcr.io/sirherobrine23/gitea
 RUNNER_TAG ?= ghcr.io/sirherobrine23/gitea_act
+
+BUILD_GITEA_TAG ?= main
+BUILD_GITEA_VERSION ?= vmain
+BUILD_GITEA_TAGS ?= tzdata
 
 DOCKER_ARGS ?=
 
 define gitea_build
 	docker buildx build \
 		$(DOCKER_ARGS) \
-		-t $(GITEA_TAG) \
+		-t $(GITEA_TAG):$(if $(filter main,$(BUILD_GITEA_TAG)),latest,$(BUILD_GITEA_TAG)) \
 		--platform $(GITEA_PLATFORMS) \
+		--build-arg GITEA_TAG=$(BUILD_GITEA_TAG) \
+		--build-arg GITEA_VERSION=$(BUILD_GITEA_VERSION) \
+		--build-arg GITEA_TAGS=$(BUILD_GITEA_TAGS) \
 		--target gitea .
 endef
 
