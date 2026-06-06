@@ -32,7 +32,7 @@ else
   if [[ -z "${DOCKER_HOST}" ]] || ! docker ps > /dev/null 2>&1; then
     GITEA_RUNNER_WORKSPACE=${GITEA_RUNNER_WORKSPACE:-/workspace}
     GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE=${GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE:-1}
-    
+
     RUN_ARGS="${RUN_ARGS} --host-workdir-parent=$GITEA_RUNNER_WORKSPACE"
     if [[ $GITEA_RUNNER_ALWAYS_CREATE_WORKSPACE -eq 1 ]]; then
       if [[ -d "$GITEA_RUNNER_WORKSPACE" ]]; then
@@ -55,12 +55,18 @@ if [[ ! -z "${GITEA_RUNNER_LABELS}" ]]; then
   EXTRA_ARGS="${EXTRA_ARGS} --labels ${GITEA_RUNNER_LABELS}"
 fi
 if [[ ! -z "${GITEA_RUNNER_EXTERNAL_CACHE}" ]]; then
-  if [[ -z "${GITEA_RUNNER_EXTERNAL_CACHE_TOKEN}" ]]; then
-    echo "External cache require TOKEN"
+  CONFIG_ARG="${CONFIG_ARG} --cache-server ${GITEA_RUNNER_EXTERNAL_CACHE}"
+
+  if [[ ! -z "${GITEA_RUNNER_EXTERNAL_CACHE_TOKEN}" ]]; then
+    CONFIG_ARG="${CONFIG_ARG} --cache-server-token ${GITEA_RUNNER_EXTERNAL_CACHE_TOKEN}"
+    unset GITEA_RUNNER_EXTERNAL_CACHE_TOKEN
+  elif [[ ! -z "${GITEA_RUNNER_EXTERNAL_CACHE_SECRET}" ]]; then
+    CONFIG_ARG="${CONFIG_ARG} --cache-server-token ${GITEA_RUNNER_EXTERNAL_CACHE_SECRET}"
+    unset GITEA_RUNNER_EXTERNAL_CACHE_SECRET
+  else
+    echo "External cache require TOKEN/SECRET, please set GITEA_RUNNER_EXTERNAL_CACHE_TOKEN or GITEA_RUNNER_EXTERNAL_CACHE_SECRET"
     exit 2
   fi
-  RUN_ARGS="${RUN_ARGS} --cache-external-cache ${GITEA_RUNNER_EXTERNAL_CACHE} --cache-external-secret ${GITEA_RUNNER_EXTERNAL_CACHE_TOKEN}"
-  unset GITEA_RUNNER_EXTERNAL_CACHE_TOKEN
 fi
 ([[ $DIND_STARTED -eq 0 ]] && [[ -z "${GITEA_RUNNER_LABELS}" ]]) && echo "Recomends add GITEA_RUNNER_LABELS to run in host because cannot start dockerd"
 

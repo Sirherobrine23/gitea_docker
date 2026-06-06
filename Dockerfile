@@ -12,7 +12,7 @@ ARG GITEA_TAG="main"
 ADD --keep-git-dir=true https://github.com/go-gitea/gitea.git#${GITEA_TAG} /
 
 FROM --platform=$BUILDPLATFORM scratch AS runner_code
-ADD --keep-git-dir=true https://gitea.com/gitea/act_runner.git#main /
+ADD --keep-git-dir=true https://gitea.com/gitea/runner.git#main /
 
 ## Base system to build
 FROM --platform=$BUILDPLATFORM debian:sid AS base_sys
@@ -37,6 +37,7 @@ WORKDIR /build
 COPY --from=runner_code /go.mod /go.sum ./
 RUN go mod download
 COPY --from=runner_code / ./
+RUN git fetch --unshallow --tags
 RUN --mount=type=bind,source=./patches/act/,target=/tmp/build-context \
     find /tmp/build-context -type f | xargs -i{} git apply --ignore-whitespace "{}"
 RUN go mod download

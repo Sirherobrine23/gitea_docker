@@ -1,0 +1,168 @@
+From d0ccb3790fe3c11fb4f74a815e8958c0d4029cf8 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Sat, 6 Jun 2026 13:48:25 -0300
+Subject: [PATCH] Add options to changes run runner and enable cache
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ internal/app/cmd/cmd.go      | 13 +++++++++++
+ internal/app/cmd/daemon.go   | 28 ++++++++++++++++++++++-
+ internal/app/cmd/register.go | 44 ++++++++++++++++++++++++------------
+ 3 files changed, 69 insertions(+), 16 deletions(-)
+
+diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
+index a964f614..0b40dbfb 100644
+--- a/internal/app/cmd/cmd.go
++++ b/internal/app/cmd/cmd.go
+@@ -38,6 +38,8 @@ func Execute(ctx context.Context) {
+ 	registerCmd.Flags().StringVar(&regArgs.Token, "token", "", "Runner token")
+ 	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
+ 	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
++	registerCmd.Flags().StringVar(&regArgs.CacheServer, "cache-server", "", "Runner cache server URL, if set, it will override the cache external server configuration in the config file")
++	registerCmd.Flags().StringVar(&regArgs.CacheServerToken, "cache-server-token", "", "Runner cache server token, if set, it will override the cache external secret configuration in the config file")
+ 	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
+ 	rootCmd.AddCommand(registerCmd)
+ 
+@@ -50,6 +52,17 @@ func Execute(ctx context.Context) {
+ 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
+ 	}
+ 	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalServer, "cache-server", "", "External Server specifies the URL of external cache server")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-token", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Host.WorkdirParent, "host-workdir-parent", "", "WorkdirParent specifies the parent directory for the host's working directory.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Network, "container-network", "", "Network specifies the network for the container.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Options, "container-options", "", "Options specifies additional options for the container.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.WorkdirParent, "container-workdir-parent", "", "WorkdirParent specifies the parent directory for the container's working directory.")
++	daemonCmd.Flags().DurationVar(&daemArgs.CommandLine.Container.DockerTimeout, "container-docker-timeout", 0, "Timeout to wait for the docker daemon to be reachable, if docker is required by require_docker or act_runner")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.Privileged, "container-privileged", false, "Privileged indicates whether the container runs in privileged mode.")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.ForcePull, "container-force-pull", false, "Pull docker image(s) even if already present")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.ForceRebuild, "container-force-rebuild", false, "Rebuild docker image(s) even if already present")
++	daemonCmd.Flags().BoolVar(&daemArgs.CommandLine.Container.RequireDocker, "container-require-docker", false, "Always require a reachable docker daemon, even if not required by act_runner")
+ 	rootCmd.AddCommand(daemonCmd)
+ 
+ 	// ./gitea-runner exec
+diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
+index 247d77f0..4ee86f5b 100644
+--- a/internal/app/cmd/daemon.go
++++ b/internal/app/cmd/daemon.go
+@@ -38,6 +38,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ 			return fmt.Errorf("invalid configuration: %w", err)
+ 		}
+ 
++		if daemArgs.CommandLine.Cache.ExternalServer != "" {
++			cfg.Cache.Enabled = new(true)
++			cfg.Cache.ExternalServer = daemArgs.CommandLine.Cache.ExternalServer
++			cfg.Cache.ExternalSecret = daemArgs.CommandLine.Cache.ExternalSecret
++		}
++		if daemArgs.CommandLine.Host.WorkdirParent != "" {
++			cfg.Host.WorkdirParent = daemArgs.CommandLine.Host.WorkdirParent
++		}
++		if daemArgs.CommandLine.Container.Network != "" {
++			cfg.Container.Network = daemArgs.CommandLine.Container.Network
++		}
++		if daemArgs.CommandLine.Container.Options != "" {
++			cfg.Container.Options = daemArgs.CommandLine.Container.Options
++		}
++		if daemArgs.CommandLine.Container.WorkdirParent != "" {
++			cfg.Container.WorkdirParent = daemArgs.CommandLine.Container.WorkdirParent
++		}
++		if daemArgs.CommandLine.Container.DockerTimeout > 0 {
++			cfg.Container.DockerTimeout = daemArgs.CommandLine.Container.DockerTimeout
++		}
++		cfg.Container.Privileged = daemArgs.CommandLine.Container.Privileged || cfg.Container.Privileged
++		cfg.Container.ForcePull = daemArgs.CommandLine.Container.ForcePull || cfg.Container.ForcePull
++		cfg.Container.ForceRebuild = daemArgs.CommandLine.Container.ForceRebuild || cfg.Container.ForceRebuild
++		cfg.Container.RequireDocker = daemArgs.CommandLine.Container.RequireDocker || cfg.Container.RequireDocker
++
+ 		initLogging(cfg)
+ 		log.Infoln("Starting runner daemon")
+ 
+@@ -193,7 +218,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+ }
+ 
+ type daemonArgs struct {
+-	Once bool
++	Once        bool
++	CommandLine config.Config // replace config from command args
+ }
+ 
+ // initLogging setup the global logrus logger.
+diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
+index 9ba5228c..b0f6b5b5 100644
+--- a/internal/app/cmd/register.go
++++ b/internal/app/cmd/register.go
+@@ -71,12 +71,14 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
+ 
+ // registerArgs represents the arguments for register command
+ type registerArgs struct {
+-	NoInteractive bool
+-	InstanceAddr  string
+-	Token         string
+-	RunnerName    string
+-	Labels        string
+-	Ephemeral     bool
++	NoInteractive    bool
++	InstanceAddr     string
++	Token            string
++	RunnerName       string
++	Labels           string
++	CacheServer      string
++	CacheServerToken string
++	Ephemeral        bool
+ }
+ 
+ type registerStage int8
+@@ -99,11 +101,13 @@ var defaultLabels = []string{
+ }
+ 
+ type registerInputs struct {
+-	InstanceAddr string
+-	Token        string
+-	RunnerName   string
+-	Labels       []string
+-	Ephemeral    bool
++	InstanceAddr     string
++	Token            string
++	RunnerName       string
++	CacheServer      string
++	CacheServerSecret string
++	Labels           []string
++	Ephemeral        bool
+ }
+ 
+ func (r *registerInputs) validate() error {
+@@ -208,10 +212,12 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
+ 
+ func initInputs(regArgs *registerArgs) *registerInputs {
+ 	inputs := &registerInputs{
+-		InstanceAddr: regArgs.InstanceAddr,
+-		Token:        regArgs.Token,
+-		RunnerName:   regArgs.RunnerName,
+-		Ephemeral:    regArgs.Ephemeral,
++		InstanceAddr:     regArgs.InstanceAddr,
++		Token:            regArgs.Token,
++		RunnerName:       regArgs.RunnerName,
++		Ephemeral:        regArgs.Ephemeral,
++		CacheServer:      regArgs.CacheServer,
++		CacheServerSecret: regArgs.CacheServerToken,
+ 	}
+ 	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
+ 	// command line flag.
+@@ -311,6 +317,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+ 		log.WithError(err).Errorf("Invalid input, please re-run act command.")
+ 		return err
+ 	}
++
++	// Add cache server configuration to registration, if specified in command line arguments, it will override the configuration in config file
++	if (inputs.CacheServer != "") {
++    cfg.Cache.Enabled = new(true)
++	  cfg.Cache.ExternalServer = inputs.CacheServer
++ 	  cfg.Cache.ExternalSecret = inputs.CacheServerSecret
++	}
++
+ 	if err := doRegister(ctx, cfg, inputs); err != nil {
+ 		return fmt.Errorf("Failed to register runner: %w", err)
+ 	}
+-- 
+2.54.0
+
