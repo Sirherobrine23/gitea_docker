@@ -1,17 +1,68 @@
-From d0ccb3790fe3c11fb4f74a815e8958c0d4029cf8 Mon Sep 17 00:00:00 2001
+From ccaab24099304e302dbb4e645b305b32fac5c187 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- internal/app/cmd/cmd.go      | 13 +++++++++++
- internal/app/cmd/daemon.go   | 28 ++++++++++++++++++++++-
- internal/app/cmd/register.go | 44 ++++++++++++++++++++++++------------
- 3 files changed, 69 insertions(+), 16 deletions(-)
+ internal/app/cmd/cache-server.go | 21 ++++++++++-----
+ internal/app/cmd/cmd.go          | 14 ++++++++++
+ internal/app/cmd/daemon.go       | 28 +++++++++++++++++++-
+ internal/app/cmd/register.go     | 44 +++++++++++++++++++++-----------
+ 4 files changed, 84 insertions(+), 23 deletions(-)
 
+diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
+index 168fffef..e8f2b93c 100644
+--- a/internal/app/cmd/cache-server.go
++++ b/internal/app/cmd/cache-server.go
+@@ -17,9 +17,10 @@ import (
+ )
+ 
+ type cacheServerArgs struct {
+-	Dir  string
+-	Host string
+-	Port uint16
++	Dir    string
++	Host   string
++	Secret string
++	Port   uint16
+ }
+ 
+ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
+@@ -32,9 +33,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 		initLogging(cfg)
+ 
+ 		var (
+-			dir  = cfg.Cache.Dir
+-			host = cfg.Cache.Host
+-			port = cfg.Cache.Port
++			dir    = cfg.Cache.Dir
++			host   = cfg.Cache.Host
++			port   = cfg.Cache.Port
++			secret = cfg.Cache.ExternalSecret
+ 		)
+ 
+ 		// cacheArgs has higher priority
+@@ -44,11 +46,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 		if cacheArgs.Host != "" {
+ 			host = cacheArgs.Host
+ 		}
++		if cacheArgs.Secret != "" {
++			secret = cacheArgs.Secret
++		}
++		if cacheArgs.Port != 0 {
++			port = cacheArgs.Port
++		}
+ 		if cacheArgs.Port != 0 {
+ 			port = cacheArgs.Port
+ 		}
+ 
+-		secret := cfg.Cache.ExternalSecret
+ 		if secret == "" {
+ 			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
+ 		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index a964f614..0b40dbfb 100644
+index a964f614..dd9b8534 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
 @@ -38,6 +38,8 @@ func Execute(ctx context.Context) {
@@ -19,7 +70,7 @@ index a964f614..0b40dbfb 100644
  	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
  	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
 +	registerCmd.Flags().StringVar(&regArgs.CacheServer, "cache-server", "", "Runner cache server URL, if set, it will override the cache external server configuration in the config file")
-+	registerCmd.Flags().StringVar(&regArgs.CacheServerToken, "cache-server-token", "", "Runner cache server token, if set, it will override the cache external secret configuration in the config file")
++	registerCmd.Flags().StringVar(&regArgs.CacheServerToken, "cache-server-secret", "", "Runner cache server token, if set, it will override the cache external secret configuration in the config file")
  	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
  	rootCmd.AddCommand(registerCmd)
  
@@ -28,7 +79,7 @@ index a964f614..0b40dbfb 100644
  	}
  	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalServer, "cache-server", "", "External Server specifies the URL of external cache server")
-+	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-token", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Host.WorkdirParent, "host-workdir-parent", "", "WorkdirParent specifies the parent directory for the host's working directory.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Network, "container-network", "", "Network specifies the network for the container.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Options, "container-options", "", "Options specifies additional options for the container.")
@@ -41,8 +92,16 @@ index a964f614..0b40dbfb 100644
  	rootCmd.AddCommand(daemonCmd)
  
  	// ./gitea-runner exec
+@@ -75,6 +88,7 @@ func Execute(ctx context.Context) {
+ 	}
+ 	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
+ 	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")
++	cacheCmd.Flags().StringVarP(&cacheArgs.Secret, "secret", "S", "", "Secret of the cache server")
+ 	cacheCmd.Flags().Uint16VarP(&cacheArgs.Port, "port", "p", 0, "Port of the cache server")
+ 	rootCmd.AddCommand(cacheCmd)
+ 
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index 247d77f0..4ee86f5b 100644
+index f533b017..c3bcac35 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
 @@ -38,6 +38,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
@@ -77,7 +136,7 @@ index 247d77f0..4ee86f5b 100644
  		initLogging(cfg)
  		log.Infoln("Starting runner daemon")
  
-@@ -193,7 +218,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -194,7 +219,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
  
  type daemonArgs struct {
@@ -88,10 +147,10 @@ index 247d77f0..4ee86f5b 100644
  
  // initLogging setup the global logrus logger.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index 9ba5228c..b0f6b5b5 100644
+index 2063c366..f1a6e485 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
-@@ -71,12 +71,14 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
+@@ -72,12 +72,14 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
  
  // registerArgs represents the arguments for register command
  type registerArgs struct {
@@ -112,7 +171,7 @@ index 9ba5228c..b0f6b5b5 100644
  }
  
  type registerStage int8
-@@ -99,11 +101,13 @@ var defaultLabels = []string{
+@@ -100,11 +102,13 @@ var defaultLabels = []string{
  }
  
  type registerInputs struct {
@@ -131,7 +190,7 @@ index 9ba5228c..b0f6b5b5 100644
  }
  
  func (r *registerInputs) validate() error {
-@@ -208,10 +212,12 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
+@@ -209,10 +213,12 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
  
  func initInputs(regArgs *registerArgs) *registerInputs {
  	inputs := &registerInputs{
@@ -148,7 +207,7 @@ index 9ba5228c..b0f6b5b5 100644
  	}
  	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
  	// command line flag.
-@@ -311,6 +317,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+@@ -312,6 +318,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
  		log.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
