@@ -12,7 +12,7 @@ ARG GITEA_TAG="main"
 ADD --keep-git-dir=true https://github.com/go-gitea/gitea.git#${GITEA_TAG} /
 
 FROM --platform=$BUILDPLATFORM scratch AS runner_code
-ADD --keep-git-dir=true https://gitea.com/gitea/runner.git#main /
+ADD --keep-git-dir=true https://github.com/Sirherobrine23/gitea-runner.git#main /
 
 ## Base system to build
 FROM --platform=$BUILDPLATFORM debian:sid AS base_sys

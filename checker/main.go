@@ -2,30 +2,36 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"maps"
+	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
+	"github.com/go-git/go-git/v5/config"
 	"github.com/go-git/go-git/v5/plumbing"
 	"github.com/go-git/go-git/v5/plumbing/object"
 	"golang.org/x/mod/semver"
 
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/client"
+	"github.com/google/go-containerregistry/pkg/authn"
+	"github.com/google/go-containerregistry/pkg/name"
+	v1 "github.com/google/go-containerregistry/pkg/v1"
+	"github.com/google/go-containerregistry/pkg/v1/remote"
+	"github.com/google/go-containerregistry/pkg/v1/remote/transport"
 
 	gha "github.com/sethvargo/go-githubactions"
 )
 
 var (
-	Repository *git.Repository
-
-	dockerClient *client.Client
-
-	Releases map[string]*Output = map[string]*Output{}
+	Repository   *git.Repository
+	OriginRemote *git.Remote
 )
 
 type Output struct {
@@ -35,23 +41,17 @@ type Output struct {
 }
 
 func init() {
-	fmt.Println("Creating docker client ...")
-	err := error(nil)
-	if dockerClient, err = client.NewClientWithOpts(client.FromEnv); err != nil {
-		fmt.Printf("Cannot connect to docker client: %s\n", err.Error())
-		os.Exit(1)
-		return
-	}
+	var err error
 
 	// Setup envs
 	repositoryPath := filepath.Join(os.TempDir(), "gitea")
-	GiteaRepository := os.Getenv("GITEA_REPO")
-	if GiteaRepository == "" {
-		GiteaRepository = "https://github.com/go-gitea/gitea.git"
+	GiteaRepositoryURL := os.Getenv("GITEA_REPO")
+	if GiteaRepositoryURL == "" {
+		GiteaRepositoryURL = "https://github.com/go-gitea/gitea.git"
 	}
 
 	fmt.Println("Cloning gitea repository ...")
-	if Repository, err = git.PlainClone(repositoryPath, false, &git.CloneOptions{URL: GiteaRepository, Tags: git.AllTags}); err != nil {
+	if Repository, err = git.PlainClone(repositoryPath, false, &git.CloneOptions{URL: GiteaRepositoryURL, Tags: git.AllTags}); err != nil {
 		if err != git.ErrRepositoryAlreadyExists {
 			fmt.Printf("Cannot clone gitea: %s\n", err.Error())
 			os.Exit(1)
@@ -64,41 +64,88 @@ func init() {
 			os.Exit(1)
 			return
 		}
+	}
 
-		fmt.Println("Updating repository ...")
-		if err = Repository.Fetch(&git.FetchOptions{Prune: true, Tags: git.AllTags}); err != nil {
-			fmt.Printf("Cannot fetch new changes: %s\n", err.Error())
+	rms, err := Repository.Remotes()
+	if err != nil {
+		fmt.Printf("Cannot get local repository remotes: %s\n", err.Error())
+		os.Exit(1)
+		return
+	}
+
+	for _, r := range rms {
+		if slices.Contains(r.Config().URLs, GiteaRepositoryURL) {
+			OriginRemote = r
+			break
+		}
+	}
+
+	if OriginRemote == nil {
+		newRepo := strings.ToLower(rand.Text())
+		fmt.Printf("Add new remote %q: %s\n", newRepo, GiteaRepositoryURL)
+		OriginRemote, err = Repository.CreateRemote(&config.RemoteConfig{
+			Name: newRepo,
+			URLs: []string{GiteaRepositoryURL},
+		})
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Cannot add repository reference: %s", err)
 			os.Exit(1)
 			return
 		}
 	}
+
+	fmt.Printf("Gettings changes from %q remote repository ...\n", OriginRemote.Config().Name)
+	if err = OriginRemote.Fetch(&git.FetchOptions{Prune: true, Tags: git.AllTags}); err != nil {
+		fmt.Printf("Cannot fetch new changes: %s\n", err.Error())
+		os.Exit(1)
+		return
+	}
+
 	fmt.Println("Respository cloned!")
 }
 
-func PullAndReturnVersion(tag string) (string, error) {
-	tag = fmt.Sprintf("ghcr.io/sirherobrine23/gitea:%s", strings.ToLower(tag))
+func GetVersionFromRegistry(tag string) (string, error) {
+	imageRef := fmt.Sprintf(
+		"ghcr.io/sirherobrine23/gitea:%s",
+		strings.ToLower(tag),
+	)
+
 	ctx := context.Background()
 
-	fmt.Printf("Downloading %s ...\n", tag)
-	if wait, err := dockerClient.ImagePull(ctx, tag, image.PullOptions{}); err == nil {
-		_, _ = io.Copy(io.Discard, wait) // Pull and ignore daemon pulling log
-	} else {
-		switch errTxt := err.Error(); errTxt {
-		case "Error response from daemon: manifest unknown":
-			return "", nil // Return no hash avaible
-		default:
-			return "", fmt.Errorf("cannot pull %s image: %s", tag, errTxt)
-		}
+	ref, err := name.ParseReference(imageRef)
+	if err != nil {
+		return "", fmt.Errorf("invalid image reference %s: %w", imageRef, err)
 	}
 
-	// Check if label exists and get hash registred
-	fmt.Println("Geting image information ...")
-	if imageInspect, _, err := dockerClient.ImageInspectWithRaw(ctx, tag); err == nil {
-		if imageInspect.Config.Labels != nil {
-			return imageInspect.Config.Labels["br.com.sirherobrine23.gitea.hash"], nil
+	fmt.Printf("Getting image info from registry: %s ...\n", imageRef)
+	img, err := remote.Image(
+		ref,
+		remote.WithContext(ctx),
+		remote.WithAuthFromKeychain(authn.DefaultKeychain),
+		remote.WithPlatform(v1.Platform{
+			OS:           "linux",
+			Architecture: "amd64",
+		}),
+	)
+	if err != nil {
+		var terr *transport.Error
+		if errors.As(err, &terr) && terr.StatusCode == http.StatusNotFound {
+			return "", nil
 		}
+
+		return "", fmt.Errorf("cannot get image %s from registry: %w", imageRef, err)
 	}
-	return "", nil
+
+	config, err := img.ConfigFile()
+	if err != nil {
+		return "", fmt.Errorf("cannot get config for %s: %w", imageRef, err)
+	}
+
+	if config.Config.Labels == nil {
+		return "", nil
+	}
+
+	return config.Config.Labels["br.com.sirherobrine23.gitea.hash"], nil
 }
 
 func LatestTag(devel bool) (*object.Commit, string, error) {
@@ -112,6 +159,7 @@ func LatestTag(devel bool) (*object.Commit, string, error) {
 		commit, currentCommit *object.Commit
 		tagReference          string
 	)
+
 	for {
 		tager, err := tags.Next()
 		if err != nil {
@@ -144,6 +192,7 @@ func LatestTag(devel bool) (*object.Commit, string, error) {
 
 func getDescribeLike(repo *git.Repository, head *plumbing.Reference) string {
 	tags, _ := repo.Tags()
+	shortHash := head.Hash().String()[:7]
 	var currentTag string
 
 	_ = tags.ForEach(func(t *plumbing.Reference) error {
@@ -152,20 +201,21 @@ func getDescribeLike(repo *git.Repository, head *plumbing.Reference) string {
 			return nil
 		}
 		if semver.Compare(t.Name().Short(), currentTag) >= 0 {
-			fmt.Println(currentTag, t.Name().Short())
 			currentTag = t.Name().Short()
 		}
 		return nil
 	})
 
-	if currentTag != "" {
-		return strings.TrimLeft(currentTag+"-"+head.Hash().String()[:7], "v")
+	if currentTag == "" {
+		return "main-" + shortHash
 	}
 
-	return "main-" + head.Hash().String()[:7]
+	return strings.TrimLeft(currentTag+"-"+shortHash, "v")
 }
 
 func main() {
+	Releases := make(map[string]*Output)
+
 	fmt.Println("Geting latest tag release")
 	_, tagRelease, err := LatestTag(false)
 	if err != nil {
@@ -174,14 +224,15 @@ func main() {
 		return
 	}
 
-	mainBranch, err := Repository.Reference(plumbing.Main, true)
+	refRemoteMain := plumbing.NewRemoteReferenceName(OriginRemote.Config().Name, "main")
+	mainBranch, err := Repository.Reference(refRemoteMain, true)
 	if err != nil {
 		fmt.Printf("Cannot get main branch: %s\n", err.Error())
 		os.Exit(1)
 		return
 	}
 
-	if hash, err := PullAndReturnVersion(tagRelease); err != nil || hash == "" {
+	if hash, err := GetVersionFromRegistry(tagRelease); err != nil || hash == "" {
 		fmt.Printf("New tag release: %q\n", tagRelease)
 		Releases["release"] = &Output{
 			DockerTag:    tagRelease,
@@ -195,7 +246,7 @@ func main() {
 		gitea_version = "main-nightly"
 	}
 
-	if hash, err := PullAndReturnVersion("latest"); !(err != nil || hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
+	if hash, err := GetVersionFromRegistry("latest"); !(err != nil || hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
 		fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
 		Releases["nightly"] = &Output{
 			DockerTag:    "latest",
@@ -204,13 +255,16 @@ func main() {
 		}
 	}
 
-	for key, value := range Releases {
-		data, err := json.Marshal(value)
-		if err != nil {
-			fmt.Printf("Error on set builds: %s\n", err.Error())
-			os.Exit(1)
-			return
-		}
-		gha.SetOutput(key, string(data))
+	data, err := json.Marshal(slices.Collect(maps.Values(Releases)))
+	if err != nil {
+		fmt.Printf("Error on set builds: %s\n", err.Error())
+		os.Exit(1)
+		return
 	}
+
+	if os.Getenv("GITHUB_ACTIONS") == "" {
+		println(string(data))
+		return
+	}
+	gha.SetOutput("BUILDS", string(data))
 }

@@ -1,23 +1,33 @@
 name: Gitea
 on:
-  push:
   workflow_dispatch:
   schedule:
     - cron: 0 0/6 * * *
+  push:
+    branches:
+    - main
 
 concurrency:
   cancel-in-progress: true
   group: gitea-build
 
+permissions:
+    contents: read
+    packages: write
+    attestations: write
+    id-token: write
+
 jobs:
-  gitea:
+  checker:
     runs-on: ubuntu-latest
     name: Gitea build
+    outputs:
+      BUILDS: ${{ steps.checker.outputs.BUILDS }}
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
 
-      - uses: actions/setup-go@v4
+      - uses: actions/setup-go@v6
         with:
           go-version-file: ./checker/go.mod
           cache-dependency-path: ./checker/go.sum
@@ -34,71 +44,61 @@ jobs:
         env:
           GITEA_REPO: "https://github.com/go-gitea/gitea.git"
 
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
+  gitea-build:
+    runs-on: ubuntu-latest
+    needs: checker
+    name: Gitea build
+    strategy:
+      matrix:
+        include: ${{ fromJSON(needs.checker.outputs.BUILDS) }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Login to Github Packages
+        uses: docker/login-action@v4
         with:
           registry: ghcr.io
-          username: Sirherobrine23
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: sirherobrine23
           password: ${{ secrets.DOCKER_TOKEN }}
 
       - name: Setup qemu
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
 
       - name: Setup buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
-      - name: Git build | Release
-        uses: docker/build-push-action@v6
-        if: ${{ steps.checker.outputs.release != '' }}
-        id: release
+      - name: Gitea build
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
-          tags: ghcr.io/sirherobrine23/gitea:${{fromJSON(steps.checker.outputs.release).DOCKER_TAG}}
           target: gitea
+          tags: |
+            ghcr.io/sirherobrine23/gitea:${{ matrix.DOCKER_TAG }}
+            sirherobrine23/gitea:${{ matrix.DOCKER_TAG }}
           build-args: |
-            GITEA_TAG=${{fromJSON(steps.checker.outputs.release).GITEA_TAG}}
-            GITEA_VERSION=${{fromJSON(steps.checker.outputs.release).GITEA_VERSION}}
+            GITEA_TAG=${{ matrix.GITEA_TAG }}
+            GITEA_VERSION=${{ matrix.GITEA_VERSION }}
 
-      - name: Git build | Nightly
-        uses: docker/build-push-action@v6
-        if: ${{ steps.checker.outputs.nightly != '' }}
-        id: nightly
+      - name: Gitea gogit build
+        uses: docker/build-push-action@v7
         with:
           context: .
           push: true
           platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
-          tags: ghcr.io/sirherobrine23/gitea:${{fromJSON(steps.checker.outputs.nightly).DOCKER_TAG}}
           target: gitea
+          tags: |
+            ghcr.io/sirherobrine23/gitea:${{ matrix.DOCKER_TAG }}-gogit
+            sirherobrine23/gitea:${{ matrix.DOCKER_TAG }}-gogit
           build-args: |
-            GITEA_TAG=${{fromJSON(steps.checker.outputs.nightly).GITEA_TAG}}
-            GITEA_VERSION=${{fromJSON(steps.checker.outputs.nightly).GITEA_VERSION}}
-
-      - name: Gogit build | Release
-        uses: docker/build-push-action@v6
-        if: ${{ steps.release.conclusion == 'success' }}
-        with:
-          context: .
-          push: true
-          platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
-          tags: ghcr.io/sirherobrine23/gitea:${{fromJSON(steps.checker.outputs.release).DOCKER_TAG}}-gogit
-          target: gitea
-          build-args: |
-            GITEA_TAG=${{fromJSON(steps.checker.outputs.release).GITEA_TAG}}
-            GITEA_VERSION=${{fromJSON(steps.checker.outputs.release).GITEA_VERSION}}
-            GITEA_TAGS=gogit
-
-      - name: Gogit build | Nightly
-        uses: docker/build-push-action@v6
-        if: ${{ steps.nightly.conclusion == 'success' }}
-        with:
-          context: .
-          push: true
-          platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
-          tags: ghcr.io/sirherobrine23/gitea:${{fromJSON(steps.checker.outputs.nightly).DOCKER_TAG}}-gogit
-          target: gitea
-          build-args: |
-            GITEA_TAG=${{fromJSON(steps.checker.outputs.nightly).GITEA_TAG}}
-            GITEA_VERSION=${{fromJSON(steps.checker.outputs.nightly).GITEA_VERSION}}
+            GITEA_TAG=${{ matrix.GITEA_TAG }}
+            GITEA_VERSION=${{ matrix.GITEA_VERSION }}
             GITEA_TAGS=gogit
