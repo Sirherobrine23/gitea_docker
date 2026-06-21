@@ -7,11 +7,11 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"maps"
 	"net/http"
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 
 	"github.com/go-git/go-git/v5"
@@ -50,8 +50,14 @@ func init() {
 		GiteaRepositoryURL = "https://github.com/go-gitea/gitea.git"
 	}
 
+	cloneConfig := git.CloneOptions{
+		URL:      GiteaRepositoryURL,
+		Tags:     git.AllTags,
+		Progress: os.Stdout,
+	}
+
 	fmt.Println("Cloning gitea repository ...")
-	if Repository, err = git.PlainClone(repositoryPath, false, &git.CloneOptions{URL: GiteaRepositoryURL, Tags: git.AllTags}); err != nil {
+	if Repository, err = git.PlainClone(repositoryPath, false, &cloneConfig); err != nil {
 		if err != git.ErrRepositoryAlreadyExists {
 			fmt.Printf("Cannot clone gitea: %s\n", err.Error())
 			os.Exit(1)
@@ -95,7 +101,7 @@ func init() {
 	}
 
 	fmt.Printf("Gettings changes from %q remote repository ...\n", OriginRemote.Config().Name)
-	if err = OriginRemote.Fetch(&git.FetchOptions{Prune: true, Tags: git.AllTags}); err != nil {
+	if err = OriginRemote.Fetch(&git.FetchOptions{Prune: true, Tags: git.AllTags, Progress: os.Stdout}); err != nil {
 		fmt.Printf("Cannot fetch new changes: %s\n", err.Error())
 		os.Exit(1)
 		return
@@ -214,7 +220,7 @@ func getDescribeLike(repo *git.Repository, head *plumbing.Reference) string {
 }
 
 func main() {
-	Releases := make(map[string]*Output)
+	Releases := []*Output{}
 
 	fmt.Println("Geting latest tag release")
 	_, tagRelease, err := LatestTag(false)
@@ -234,11 +240,11 @@ func main() {
 
 	if hash, err := GetVersionFromRegistry(tagRelease); err != nil || hash == "" {
 		fmt.Printf("New tag release: %q\n", tagRelease)
-		Releases["release"] = &Output{
+		Releases = append(Releases, &Output{
 			DockerTag:    tagRelease,
 			GiteaTag:     tagRelease,
 			GiteaVersion: tagRelease,
-		}
+		})
 	}
 
 	gitea_version := getDescribeLike(Repository, mainBranch)
@@ -248,23 +254,20 @@ func main() {
 
 	if hash, err := GetVersionFromRegistry("latest"); !(err != nil || hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
 		fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
-		Releases["nightly"] = &Output{
+		Releases = append(Releases, &Output{
 			DockerTag:    "latest",
 			GiteaTag:     "main",
 			GiteaVersion: gitea_version,
+		})
+	}
+
+	if jsValue, err := json.Marshal(Releases); err == nil {
+		if os.Getenv("GITHUB_ACTIONS") != "" {
+			gha.SetOutput("BUILDS", string(jsValue))
+			gha.SetOutput("BUILDS_COUNT", strconv.Itoa(len(Releases)))
 		}
 	}
-
-	data, err := json.Marshal(slices.Collect(maps.Values(Releases)))
-	if err != nil {
-		fmt.Printf("Error on set builds: %s\n", err.Error())
-		os.Exit(1)
-		return
+	if jsValue, err := json.MarshalIndent(Releases, "", "  "); err == nil {
+		println(string(jsValue))
 	}
-
-	if os.Getenv("GITHUB_ACTIONS") == "" {
-		println(string(data))
-		return
-	}
-	gha.SetOutput("BUILDS", string(data))
 }

@@ -2,7 +2,7 @@ name: Gitea
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 0/6 * * *
+    - cron: 0 0/3 * * *
   push:
     branches:
     - main
@@ -20,9 +20,10 @@ permissions:
 jobs:
   checker:
     runs-on: ubuntu-latest
-    name: Gitea build
+    name: Check build versions
     outputs:
       BUILDS: ${{ steps.checker.outputs.BUILDS }}
+      BUILDS_COUNT: ${{ steps.checker.outputs.BUILDS_COUNT }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -48,6 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     needs: checker
     name: Gitea build
+    if: ${{ needs.checker.outputs.BUILDS_COUNT > 0 }}
     strategy:
       matrix:
         include: ${{ fromJSON(needs.checker.outputs.BUILDS) }}

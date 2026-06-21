@@ -2,7 +2,7 @@ name: Runner image
 on:
   workflow_dispatch:
   schedule:
-    - cron: 0 0/12 * * *
+    - cron: 0 0/8 * * *
 
 concurrency:
   cancel-in-progress: true
@@ -15,7 +15,50 @@ permissions:
     id-token: write
 
 jobs:
-  runner-images:
+  rootless:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - ACT_TAG: latest
+          - ACT_TAG: "24.04"
+          - ACT_TAG: "22.04"
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Login to Github Packages
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v4
+        with:
+          username: sirherobrine23
+          password: ${{ secrets.DOCKER_TOKEN }}
+
+      - name: Setup qemu
+        uses: docker/setup-qemu-action@v4
+
+      - name: Setup buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Docker build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          target: rootless-runner
+          build-args: ACT_TAG=${{ matrix.ACT_TAG }}
+          tags: |
+            ghcr.io/sirherobrine23/gitea_act:rootless-${{ matrix.ACT_TAG == 'latest' && matrix.ACT_TAG || format('act-{0}', matrix.ACT_TAG) }}
+            sirherobrine23/gitea_runner:rootless-${{ matrix.ACT_TAG == 'latest' && matrix.ACT_TAG || format('act-{0}', matrix.ACT_TAG) }}
+
+  minimal:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -40,11 +83,15 @@ jobs:
       - name: Setup buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Build rootless
-        run: make runner-rootless DOCKER_ARGS=--push
-
-      - name: Build minimal
-        run: make runner-minimal DOCKER_ARGS=--push
-
-      - name: Build custom
-        run: make runner-custom DOCKER_ARGS=--push
+      - name: Docker build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          push: true
+          platforms: linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
+          target: minimal-runner
+          tags: |
+            ghcr.io/sirherobrine23/gitea_act:minimal
+            ghcr.io/sirherobrine23/gitea_act:latest
+            sirherobrine23/gitea_runner:minimal
+            sirherobrine23/gitea_runner:latest

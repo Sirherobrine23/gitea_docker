@@ -37,7 +37,15 @@ WORKDIR /build
 COPY --from=runner_code /go.mod /go.sum ./
 RUN go mod download
 COPY --from=runner_code / ./
-RUN git fetch --unshallow --tags
+RUN git fetch --unshallow --tags && \
+  LATEST_TAG=$(git tag --list --sort=-v:refname | head -n 1) && \
+  COMMITS_AHEAD=$(git rev-list ${LATEST_TAG}..HEAD --count 2>/dev/null || echo "0") && \
+  COMMIT_HASH=$(git rev-parse --short HEAD) && \
+  if [ "$COMMITS_AHEAD" -eq "0" ]; then \
+    echo "$LATEST_TAG" | sed 's/^v//' > VERSION; \
+  else \
+    echo "$LATEST_TAG+$COMMITS_AHEAD-g$COMMIT_HASH" | sed 's/^v//' > VERSION; \
+  fi
 RUN --mount=type=bind,source=./patches/act/,target=/tmp/build-context \
     find /tmp/build-context -type f | xargs -i{} git apply --ignore-whitespace "{}"
 RUN go mod download
@@ -46,7 +54,15 @@ FROM --platform=$BUILDPLATFORM gitea_runner_base AS runner
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
-RUN GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make
+ARG RUNNER_VERSION="$(shell cat VERSION)" # Makefile get version from file
+RUN --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/root/go/pkg/mod \
+  GOOS=$TARGETOS \
+  GOARCH=$TARGETARCH \
+  GOARM=$TARGETVARIANT \
+  VERSION="$RUNNER_VERSION" \
+  RELASE_VERSION="$RUNNER_VERSION" \
+  make
 
 ### Gitea
 FROM base_sys AS gitea_builder_base
@@ -70,7 +86,13 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG GITEA_VERSION
 ARG GITEA_TAGS
-RUN TAGS="bindata timetzdata $GITEA_TAGS" GOOS=$TARGETOS GOARCH=$TARGETARCH GOARM=$TARGETVARIANT make backend
+RUN --mount=type=cache,target=/root/.cache/go-build \
+  --mount=type=cache,target=/root/go/pkg/mod \
+  TAGS="bindata timetzdata $GITEA_TAGS" \
+  GOOS=$TARGETOS \
+  GOARCH=$TARGETARCH \
+  GOARM=$TARGETVARIANT \
+  make backend
 
 # Gitea latest image
 FROM debian:stable AS gitea
@@ -119,7 +141,6 @@ COPY --from=runner /build/gitea-runner /usr/bin/gitea-runner
 COPY ./runner.sh /usr/bin/run.sh
 RUN chmod a+x /usr/bin/run.sh && mkdir /data
 ENTRYPOINT [ "/usr/bin/run.sh" ]
-
 
 ##### ********************* rootless ********************* #####
 # This images run host target without system root privileges
