@@ -18,17 +18,22 @@ ADD --keep-git-dir=true https://github.com/Sirherobrine23/gitea-runner.git#main 
 FROM --platform=$BUILDPLATFORM debian:sid AS base_sys
 ARG DEBIAN_FRONTEND="noninteractive"
 RUN <<EOF
-set -e
-apt update
-apt install -y golang git wget curl make ca-certificates nodejs
+set -eux
+apt-get update
+apt-get install -y --no-install-recommends \
+  golang git wget curl make ca-certificates nodejs npm
 update-ca-certificates
-corepack install -g npm
-corepack install -g pnpm
-corepack enable npm
+
+# Install/upgrade Corepack before creating its shims. Do not select an
+# unversioned pnpm here; the Gitea package.json declares the required version.
+npm install --global corepack --force
 corepack enable pnpm
-npm install -g corepack --force
-pnpm -v
-npm -v
+
+node --version
+npm --version
+corepack --version
+
+rm -rf /var/lib/apt/lists/*
 EOF
 
 ### Gitea Runner
@@ -57,9 +62,9 @@ ARG TARGETVARIANT
 ARG RUNNER_VERSION="$(shell cat VERSION)" # Makefile get version from file
 RUN --mount=type=cache,target=/root/.cache/go-build \
   --mount=type=cache,target=/root/go/pkg/mod \
-  GOOS=$TARGETOS \
-  GOARCH=$TARGETARCH \
-  GOARM=$TARGETVARIANT \
+  GOOS="$TARGETOS" \
+  GOARCH="$TARGETARCH" \
+  GOARM="${TARGETVARIANT#v}" \
   VERSION="$RUNNER_VERSION" \
   RELASE_VERSION="$RUNNER_VERSION" \
   make
@@ -69,16 +74,31 @@ FROM base_sys AS gitea_builder_base
 # Copy go mod and node package and download
 WORKDIR /build
 COPY --from=gitea_code /go.mod /go.sum ./
-RUN go mod download
+RUN go mod tidy && go mod download
 # COPY --from=gitea_code /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
 COPY --from=gitea_code /package.json /pnpm-*.yaml ./
-RUN pnpm install --no-frozen-lockfile
+RUN <<EOF
+set -eux
+
+# Install exactly the package-manager version declared by Gitea, for example
+# pnpm@11.9.0. This prevents Corepack from resolving an alpha/dev release.
+PACKAGE_MANAGER="$(node -p 'require("./package.json").packageManager || ""')"
+case "$PACKAGE_MANAGER" in
+  pnpm@*) ;;
+  *) echo "Unsupported or missing packageManager: $PACKAGE_MANAGER" >&2; exit 1 ;;
+esac
+
+corepack install --global "$PACKAGE_MANAGER"
+pnpm --version
+pnpm install --frozen-lockfile
+EOF
 # Copy code
 COPY --from=gitea_code / ./
 RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context \
-  (git apply /tmp/build-context/add_env.patch || git apply /tmp/build-context/old_add_env.patch); \
   find /tmp/build-context -type f | grep -v add_env.patch | xargs -i{} git apply --ignore-whitespace "{}"
+RUN go mod tidy
 RUN make frontend
+
 # Build frontend and prepare go build
 FROM --platform=$BUILDPLATFORM gitea_builder_base AS gitea_backend
 ARG TARGETOS
@@ -148,6 +168,7 @@ ENTRYPOINT [ "/usr/bin/run.sh" ]
 
 # rootless
 FROM ghcr.io/catthehacker/ubuntu:act-${ACT_TAG} AS rootless-runner
+ARG ACT_TAG
 LABEL org.opencontainers.image.source="https://sirherobrine23.com.br/Sirherobrine23/act_runner_dind.git"
 LABEL org.opencontainers.image.description="Gitea rootless gitea runner image"
 LABEL org.opencontainers.image.licenses=MIT

@@ -1,6 +1,6 @@
 GITEA_PLATFORMS ?= linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
 MINIMAL_PLATFORM ?= linux/arm64,linux/amd64,linux/riscv64,linux/ppc64le,linux/s390x,linux/386,linux/arm/v7
-ROOTLESS_PLATFORM ?= linux/amd64,linux/arm64
+ROOTLESS_PLATFORM ?= linux/arm64,linux/amd64
 
 GITEA_TAG ?= ghcr.io/sirherobrine23/gitea
 RUNNER_TAG ?= ghcr.io/sirherobrine23/gitea_act
