@@ -1,4 +1,4 @@
-From ccaab24099304e302dbb4e645b305b32fac5c187 Mon Sep 17 00:00:00 2001
+From 8db98ae9a1722ff94a2ed45e0e4c884ea3492706 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -7,9 +7,9 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
  internal/app/cmd/cache-server.go | 21 ++++++++++-----
  internal/app/cmd/cmd.go          | 14 ++++++++++
- internal/app/cmd/daemon.go       | 28 +++++++++++++++++++-
- internal/app/cmd/register.go     | 44 +++++++++++++++++++++-----------
- 4 files changed, 84 insertions(+), 23 deletions(-)
+ internal/app/cmd/daemon.go       | 28 ++++++++++++++++++-
+ internal/app/cmd/register.go     | 46 +++++++++++++++++++++-----------
+ 4 files changed, 85 insertions(+), 24 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
 index 168fffef..e8f2b93c 100644
@@ -62,11 +62,11 @@ index 168fffef..e8f2b93c 100644
  			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index a964f614..dd9b8534 100644
+index 95074001..f0a39149 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
-@@ -38,6 +38,8 @@ func Execute(ctx context.Context) {
- 	registerCmd.Flags().StringVar(&regArgs.Token, "token", "", "Runner token")
+@@ -39,6 +39,8 @@ func Execute(ctx context.Context) {
+ 	registerCmd.Flags().StringVar(&regArgs.TokenFile, "token-file", "", "Path to a file containing the runner token")
  	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
  	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
 +	registerCmd.Flags().StringVar(&regArgs.CacheServer, "cache-server", "", "Runner cache server URL, if set, it will override the cache external server configuration in the config file")
@@ -74,7 +74,7 @@ index a964f614..dd9b8534 100644
  	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
  	rootCmd.AddCommand(registerCmd)
  
-@@ -50,6 +52,17 @@ func Execute(ctx context.Context) {
+@@ -51,6 +53,17 @@ func Execute(ctx context.Context) {
  		RunE:  runDaemon(ctx, &daemArgs, &configFile),
  	}
  	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
@@ -92,7 +92,7 @@ index a964f614..dd9b8534 100644
  	rootCmd.AddCommand(daemonCmd)
  
  	// ./gitea-runner exec
-@@ -75,6 +88,7 @@ func Execute(ctx context.Context) {
+@@ -76,6 +89,7 @@ func Execute(ctx context.Context) {
  	}
  	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
  	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")
@@ -147,31 +147,33 @@ index f533b017..c3bcac35 100644
  
  // initLogging setup the global logrus logger.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index 2063c366..f1a6e485 100644
+index bc2f3f63..cdc0beca 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
-@@ -72,12 +72,14 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
+@@ -72,13 +72,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
  
  // registerArgs represents the arguments for register command
  type registerArgs struct {
 -	NoInteractive bool
 -	InstanceAddr  string
 -	Token         string
+-	TokenFile     string
 -	RunnerName    string
 -	Labels        string
 -	Ephemeral     bool
 +	NoInteractive    bool
 +	InstanceAddr     string
 +	Token            string
++	TokenFile        string
 +	RunnerName       string
 +	Labels           string
++	Ephemeral        bool
 +	CacheServer      string
 +	CacheServerToken string
-+	Ephemeral        bool
  }
  
  type registerStage int8
-@@ -100,11 +102,13 @@ var defaultLabels = []string{
+@@ -103,11 +105,13 @@ var defaultLabels = []string{
  }
  
  type registerInputs struct {
@@ -180,48 +182,48 @@ index 2063c366..f1a6e485 100644
 -	RunnerName   string
 -	Labels       []string
 -	Ephemeral    bool
-+	InstanceAddr     string
-+	Token            string
-+	RunnerName       string
-+	CacheServer      string
++	InstanceAddr      string
++	Token             string
++	RunnerName        string
++	CacheServer       string
 +	CacheServerSecret string
-+	Labels           []string
-+	Ephemeral        bool
++	Labels            []string
++	Ephemeral         bool
  }
  
  func (r *registerInputs) validate() error {
-@@ -209,10 +213,12 @@ func (r *registerInputs) assignToNext(stage registerStage, value string, cfg *co
- 
- func initInputs(regArgs *registerArgs) *registerInputs {
+@@ -229,10 +233,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
+ 		token = envToken
+ 	}
  	inputs := &registerInputs{
 -		InstanceAddr: regArgs.InstanceAddr,
--		Token:        regArgs.Token,
+-		Token:        token,
 -		RunnerName:   regArgs.RunnerName,
 -		Ephemeral:    regArgs.Ephemeral,
-+		InstanceAddr:     regArgs.InstanceAddr,
-+		Token:            regArgs.Token,
-+		RunnerName:       regArgs.RunnerName,
-+		Ephemeral:        regArgs.Ephemeral,
-+		CacheServer:      regArgs.CacheServer,
++		InstanceAddr:      regArgs.InstanceAddr,
++		Token:             token,
++		RunnerName:        regArgs.RunnerName,
++		Ephemeral:         regArgs.Ephemeral,
++		CacheServer:       regArgs.CacheServer,
 +		CacheServerSecret: regArgs.CacheServerToken,
  	}
  	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
  	// command line flag.
-@@ -312,6 +318,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+@@ -338,6 +344,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
  		log.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
 +
 +	// Add cache server configuration to registration, if specified in command line arguments, it will override the configuration in config file
-+	if (inputs.CacheServer != "") {
-+    cfg.Cache.Enabled = new(true)
-+	  cfg.Cache.ExternalServer = inputs.CacheServer
-+ 	  cfg.Cache.ExternalSecret = inputs.CacheServerSecret
++	if inputs.CacheServer != "" {
++		cfg.Cache.Enabled = new(true)
++		cfg.Cache.ExternalServer = inputs.CacheServer
++		cfg.Cache.ExternalSecret = inputs.CacheServerSecret
 +	}
 +
  	if err := doRegister(ctx, cfg, inputs); err != nil {
  		return fmt.Errorf("Failed to register runner: %w", err)
  	}
 -- 
-2.54.0
+2.55.0
 
