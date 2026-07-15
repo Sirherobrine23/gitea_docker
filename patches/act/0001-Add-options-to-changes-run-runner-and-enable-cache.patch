@@ -1,4 +1,4 @@
-From 8db98ae9a1722ff94a2ed45e0e4c884ea3492706 Mon Sep 17 00:00:00 2001
+From 3c7281e7575b34e1c676986e7567c8d45d0601a7 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -7,9 +7,9 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
  internal/app/cmd/cache-server.go | 21 ++++++++++-----
  internal/app/cmd/cmd.go          | 14 ++++++++++
- internal/app/cmd/daemon.go       | 28 ++++++++++++++++++-
+ internal/app/cmd/daemon.go       | 30 +++++++++++++++++++--
  internal/app/cmd/register.go     | 46 +++++++++++++++++++++-----------
- 4 files changed, 85 insertions(+), 24 deletions(-)
+ 4 files changed, 86 insertions(+), 25 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
 index 168fffef..e8f2b93c 100644
@@ -62,7 +62,7 @@ index 168fffef..e8f2b93c 100644
  			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index 95074001..f0a39149 100644
+index 18aaa373..312ede1c 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
 @@ -39,6 +39,8 @@ func Execute(ctx context.Context) {
@@ -74,10 +74,10 @@ index 95074001..f0a39149 100644
  	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
  	rootCmd.AddCommand(registerCmd)
  
-@@ -51,6 +53,17 @@ func Execute(ctx context.Context) {
- 		RunE:  runDaemon(ctx, &daemArgs, &configFile),
+@@ -52,6 +54,17 @@ func Execute(ctx context.Context) {
  	}
  	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
+ 	daemonCmd.Flags().StringVar(&daemArgs.Labels, "labels", os.Getenv("GITEA_RUNNER_LABELS"), "Runner labels, comma separated. Overrides the labels of an already registered runner")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalServer, "cache-server", "", "External Server specifies the URL of external cache server")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Host.WorkdirParent, "host-workdir-parent", "", "WorkdirParent specifies the parent directory for the host's working directory.")
@@ -92,7 +92,7 @@ index 95074001..f0a39149 100644
  	rootCmd.AddCommand(daemonCmd)
  
  	// ./gitea-runner exec
-@@ -76,6 +89,7 @@ func Execute(ctx context.Context) {
+@@ -80,6 +93,7 @@ func Execute(ctx context.Context) {
  	}
  	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
  	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")
@@ -101,7 +101,7 @@ index 95074001..f0a39149 100644
  	rootCmd.AddCommand(cacheCmd)
  
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index f533b017..c3bcac35 100644
+index a4b5a0a6..76a1f3d4 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
 @@ -38,6 +38,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
@@ -136,18 +136,20 @@ index f533b017..c3bcac35 100644
  		initLogging(cfg)
  		log.Infoln("Starting runner daemon")
  
-@@ -194,7 +219,8 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -200,8 +225,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
  
  type daemonArgs struct {
--	Once bool
+-	Once   bool
+-	Labels string
 +	Once        bool
++	Labels      string
 +	CommandLine config.Config // replace config from command args
  }
  
- // initLogging setup the global logrus logger.
+ // resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index bc2f3f63..cdc0beca 100644
+index 6859522d..3a6cbd6a 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
 @@ -72,13 +72,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
