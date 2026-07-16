@@ -238,7 +238,8 @@ func main() {
 		return
 	}
 
-	if hash, err := GetVersionFromRegistry(tagRelease); err != nil || hash == "" {
+	hash, err := GetVersionFromRegistry(tagRelease)
+	if err != nil || hash == "" {
 		fmt.Printf("New tag release: %q\n", tagRelease)
 		Releases = append(Releases, &Output{
 			DockerTag:    tagRelease,
@@ -252,13 +253,16 @@ func main() {
 		gitea_version = "main-nightly"
 	}
 
-	if hash, err := GetVersionFromRegistry("latest"); !(err != nil || hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
-		fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
-		Releases = append(Releases, &Output{
-			DockerTag:    "latest",
-			GiteaTag:     "main",
-			GiteaVersion: gitea_version,
-		})
+	hash, err = GetVersionFromRegistry("latest")
+	if err == nil {
+		if hash == "" || !(hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
+			fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
+			Releases = append(Releases, &Output{
+				DockerTag:    "latest",
+				GiteaTag:     "main",
+				GiteaVersion: gitea_version,
+			})
+		}
 	}
 
 	if jsValue, err := json.Marshal(Releases); err == nil {
