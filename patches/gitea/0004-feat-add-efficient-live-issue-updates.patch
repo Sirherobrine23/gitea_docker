@@ -1,0 +1,1928 @@
+From 294e2d3a68c84edbd246a9393c732ebf07bc7cc6 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Thu, 16 Jul 2026 07:33:39 -0300
+Subject: [PATCH 4/4] feat: add efficient live issue updates
+
+Avoid re-rendering the complete timeline every two seconds and do not morph
+all comments when a page first opens. Use mutation invalidations for common
+issue actions, resume disconnected pages from stable content hashes, retain a
+low-frequency safety refresh, preserve the visible scroll anchor and bind every
+connection to Gitea's graceful-shutdown context.
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/web/repo/issue.go                     |   7 +
+ routers/web/repo/issue_comment.go             |   4 +
+ routers/web/repo/issue_label.go               |   1 +
+ routers/web/repo/issue_live.go                | 678 ++++++++++++++++++
+ routers/web/repo/issue_live_hub.go            |  71 ++
+ routers/web/repo/issue_live_test.go           | 171 +++++
+ routers/web/web.go                            |   1 +
+ templates/repo/issue/view_content.tmpl        |  64 +-
+ .../issue/view_content/comments_live.tmpl     |   4 +
+ .../issue/view_content/issue_comment.tmpl     |  63 ++
+ web_src/js/features/comp/ReactionSelector.ts  |   6 +
+ web_src/js/features/repo-issue-live.ts        | 631 ++++++++++++++++
+ web_src/js/index.ts                           |   2 +
+ 13 files changed, 1640 insertions(+), 63 deletions(-)
+ create mode 100644 routers/web/repo/issue_live.go
+ create mode 100644 routers/web/repo/issue_live_hub.go
+ create mode 100644 routers/web/repo/issue_live_test.go
+ create mode 100644 templates/repo/issue/view_content/comments_live.tmpl
+ create mode 100644 templates/repo/issue/view_content/issue_comment.tmpl
+ create mode 100644 web_src/js/features/repo-issue-live.ts
+
+diff --git a/routers/web/repo/issue.go b/routers/web/repo/issue.go
+index 10c9d7d726..e413abccbb 100644
+--- a/routers/web/repo/issue.go
++++ b/routers/web/repo/issue.go
+@@ -295,6 +295,7 @@ func UpdateIssueTitle(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(issue)
+ 	ctx.JSON(http.StatusOK, map[string]any{
+ 		"title": issue.Title,
+ 	})
+@@ -319,6 +320,7 @@ func UpdateIssueRef(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(issue)
+ 	ctx.JSON(http.StatusOK, map[string]any{
+ 		"ref": ref,
+ 	})
+@@ -368,6 +370,7 @@ func UpdateIssueContent(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(issue)
+ 	ctx.JSON(http.StatusOK, map[string]any{
+ 		"content":        commentContentHTML(ctx, content),
+ 		"contentVersion": issue.ContentVersion,
+@@ -398,6 +401,7 @@ func UpdateIssueDeadline(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(issue)
+ 	ctx.JSONRedirect("")
+ }
+ 
+@@ -431,6 +435,7 @@ func UpdateIssueMilestone(ctx *context.Context) {
+ 		}
+ 	}
+ 
++	notifyIssueLiveIssues(issues)
+ 	ctx.JSONOK()
+ }
+ 
+@@ -475,6 +480,7 @@ func UpdateIssueAssignee(ctx *context.Context) {
+ 			}
+ 		}
+ 	}
++	notifyIssueLiveIssues(issues)
+ 	ctx.JSONOK()
+ }
+ 
+@@ -552,6 +558,7 @@ func ChangeIssueReaction(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(issue)
+ 	if len(issue.Reactions) == 0 {
+ 		ctx.JSON(http.StatusOK, map[string]any{
+ 			"empty": true,
+diff --git a/routers/web/repo/issue_comment.go b/routers/web/repo/issue_comment.go
+index 4681c2fecd..b82912a98e 100644
+--- a/routers/web/repo/issue_comment.go
++++ b/routers/web/repo/issue_comment.go
+@@ -184,6 +184,7 @@ func NewComment(ctx *context.Context) {
+ 		}
+ 	} // end if: handle close or reopen
+ 
++	notifyIssueLiveIssue(issue)
+ 	ctx.JSONRedirect(redirect)
+ }
+ 
+@@ -264,6 +265,7 @@ func UpdateCommentContent(ctx *context.Context) {
+ 		}
+ 	}
+ 
++	notifyIssueLiveIssue(comment.Issue)
+ 	ctx.JSON(http.StatusOK, map[string]any{
+ 		"content":        commentContentHTML(ctx, renderedContent),
+ 		"contentVersion": comment.ContentVersion,
+@@ -302,6 +304,7 @@ func DeleteComment(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(comment.Issue)
+ 	ctx.Status(http.StatusOK)
+ }
+ 
+@@ -390,6 +393,7 @@ func ChangeCommentReaction(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssue(comment.Issue)
+ 	if len(comment.Reactions) == 0 {
+ 		ctx.JSON(http.StatusOK, map[string]any{
+ 			"empty": true,
+diff --git a/routers/web/repo/issue_label.go b/routers/web/repo/issue_label.go
+index f926234814..67b83e588d 100644
+--- a/routers/web/repo/issue_label.go
++++ b/routers/web/repo/issue_label.go
+@@ -229,5 +229,6 @@ func UpdateIssueLabel(ctx *context.Context) {
+ 		return
+ 	}
+ 
++	notifyIssueLiveIssues(issues)
+ 	ctx.JSONOK()
+ }
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+new file mode 100644
+index 0000000000..d054d962f9
+--- /dev/null
++++ b/routers/web/repo/issue_live.go
+@@ -0,0 +1,678 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package repo
++
++import (
++	stdcontext "context"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"sort"
++	"strconv"
++	"strings"
++	"time"
++
++	issues_model "gitea.dev/models/issues"
++	"gitea.dev/models/unit"
++	user_model "gitea.dev/models/user"
++	"gitea.dev/modules/graceful"
++	"gitea.dev/modules/log"
++	"gitea.dev/modules/reqctx"
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/templates"
++	"gitea.dev/services/context"
++	user_service "gitea.dev/services/user"
++
++	"github.com/coder/websocket"
++	nethtml "golang.org/x/net/html"
++)
++
++const tplIssueLiveComments templates.TplName = "repo/issue/view_content/comments_live"
++
++const (
++	issueLiveSafetyRefreshInterval = 60 * time.Second
++	issueLivePingInterval          = 25 * time.Second
++	issueLiveWriteTimeout          = 10 * time.Second
++	issueLiveResumeTimeout         = 10 * time.Second
++	issueLiveReadLimit             = 1 << 22
++)
++
++type issueLiveClientState struct {
++	Key             string `json:"key"`
++	BeforeKey       string `json:"beforeKey,omitempty"`
++	Hash            string `json:"hash,omitempty"`
++	ContentVersion  string `json:"contentVersion,omitempty"`
++	ReactionState   string `json:"reactionState,omitempty"`
++	AttachmentState string `json:"attachmentState,omitempty"`
++}
++
++type issueLiveClientMessage struct {
++	Type        string                 `json:"type"`
++	Initialized bool                   `json:"initialized,omitempty"`
++	States      []issueLiveClientState `json:"states,omitempty"`
++}
++
++type issueLiveOperation struct {
++	Action    string `json:"action"`
++	Key       string `json:"key"`
++	BeforeKey string `json:"beforeKey,omitempty"`
++	HTML      string `json:"html,omitempty"`
++	Hash      string `json:"hash,omitempty"`
++}
++
++type issueLiveServerState struct {
++	Key             string `json:"key"`
++	BeforeKey       string `json:"beforeKey,omitempty"`
++	Hash            string `json:"hash"`
++	ContentVersion  string `json:"contentVersion,omitempty"`
++	ReactionState   string `json:"reactionState,omitempty"`
++	AttachmentState string `json:"attachmentState,omitempty"`
++}
++
++type issueLiveServerMessage struct {
++	Type       string                 `json:"type"`
++	Sequence   uint64                 `json:"sequence,omitempty"`
++	Operations []issueLiveOperation   `json:"operations,omitempty"`
++	States     []issueLiveServerState `json:"states,omitempty"`
++}
++
++type issueLiveSnapshotEntry struct {
++	Key             string
++	BeforeKey       string
++	HTML            string
++	Hash            [sha256.Size]byte
++	ContentVersion  string
++	ReactionState   string
++	AttachmentState string
++}
++
++type issueLiveSnapshotState struct {
++	BeforeKey string
++	Hash      [sha256.Size]byte
++}
++
++func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
++	issue, err := issues_model.GetIssueByIndex(ctx, ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
++	if err != nil {
++		return "", err
++	}
++	issue.Repo = ctx.Repo.Repository
++
++	if err := issue.LoadPullRequest(ctx); err != nil {
++		return "", err
++	}
++	if issue.IsPull {
++		if !ctx.Repo.Permission.CanRead(unit.TypePullRequests) {
++			return "", errors.New("permission denied while reading pull request")
++		}
++		if ctx.PathParam("type") != "pulls" {
++			return "", errors.New("issue type does not match pull request")
++		}
++		if issue.PullRequest == nil {
++			return "", errors.New("pull request data was not loaded")
++		}
++		if err := issue.PullRequest.LoadBaseRepo(ctx); err != nil {
++			return "", err
++		}
++	} else {
++		if !ctx.Repo.Permission.CanRead(unit.TypeIssues) {
++			return "", errors.New("permission denied while reading issue")
++		}
++		if ctx.PathParam("type") != "issues" {
++			return "", errors.New("issue type does not match issue")
++		}
++	}
++
++	if err := issue.LoadAttributes(ctx); err != nil {
++		return "", err
++	}
++	if err := filterXRefComments(ctx, issue); err != nil {
++		return "", err
++	}
++
++	ctx.Data["Issue"] = issue
++	ctx.Data["IsAttachmentEnabled"] = setting.Attachment.Enabled
++	ctx.Data["IsIssuePoster"] = ctx.IsSigned && issue.IsPoster(ctx.Doer.ID)
++	ctx.Data["HasIssuesOrPullsWritePermission"] = ctx.Repo.Permission.CanWriteIssuesOrPulls(issue.IsPull)
++	ctx.Data["HasProjectsWritePermission"] = ctx.Repo.Permission.CanWrite(unit.TypeProjects)
++	ctx.Data["IsRepoAdmin"] = ctx.IsSigned && (ctx.Repo.Permission.IsAdmin() || ctx.Doer.IsAdmin)
++	ctx.Data["CanBlockUser"] = func(blocker, blockee *user_model.User) bool {
++		return user_service.CanBlockUser(ctx, ctx.Doer, blocker, blockee)
++	}
++	if issue.IsPull {
++		ctx.Data["BaseTarget"] = issue.PullRequest.BaseBranch
++	}
++
++	prepareIssueViewCommentsAndSidebarParticipants(ctx, issue)
++
++	rendered, err := ctx.RenderToHTML(tplIssueLiveComments, ctx.Data)
++	if err != nil {
++		return "", err
++	}
++	return string(rendered), nil
++}
++
++func issueLiveNodeAttribute(node *nethtml.Node, name string) string {
++	for _, attribute := range node.Attr {
++		if attribute.Key == name {
++			return attribute.Val
++		}
++	}
++	return ""
++}
++
++func issueLiveNodeHasClass(node *nethtml.Node, className string) bool {
++	for _, current := range strings.Fields(issueLiveNodeAttribute(node, "class")) {
++		if current == className {
++			return true
++		}
++	}
++	return false
++}
++
++func issueLiveIsCommentKey(value string) bool {
++	for _, prefix := range []string{"issue-", "pull-", "issuecomment-", "pullcomment-"} {
++		if !strings.HasPrefix(value, prefix) {
++			continue
++		}
++		_, err := strconv.ParseInt(strings.TrimPrefix(value, prefix), 10, 64)
++		return err == nil
++	}
++	return false
++}
++
++func issueLiveFindCommentKey(node *nethtml.Node) string {
++	if key := issueLiveNodeAttribute(node, "id"); issueLiveIsCommentKey(key) {
++		return key
++	}
++	for child := node.FirstChild; child != nil; child = child.NextSibling {
++		if key := issueLiveFindCommentKey(child); key != "" {
++			return key
++		}
++	}
++	return ""
++}
++
++func issueLiveFindDescendantAttribute(node *nethtml.Node, name string) string {
++	if value := issueLiveNodeAttribute(node, name); value != "" {
++		return value
++	}
++	for child := node.FirstChild; child != nil; child = child.NextSibling {
++		if value := issueLiveFindDescendantAttribute(child, name); value != "" {
++			return value
++		}
++	}
++	return ""
++}
++
++func issueLiveNodeText(node *nethtml.Node) string {
++	if node.Type == nethtml.TextNode {
++		return node.Data
++	}
++	var text strings.Builder
++	for child := node.FirstChild; child != nil; child = child.NextSibling {
++		text.WriteString(issueLiveNodeText(child))
++	}
++	return text.String()
++}
++
++func issueLiveFindDescendantByClass(node *nethtml.Node, className string) *nethtml.Node {
++	if node.Type == nethtml.ElementNode && issueLiveNodeHasClass(node, className) {
++		return node
++	}
++	for child := node.FirstChild; child != nil; child = child.NextSibling {
++		if found := issueLiveFindDescendantByClass(child, className); found != nil {
++			return found
++		}
++	}
++	return nil
++}
++
++func issueLiveReactionState(node *nethtml.Node) string {
++	container := issueLiveFindDescendantByClass(node, "bottom-reactions")
++	if container == nil {
++		return ""
++	}
++
++	parts := make([]string, 0, 4)
++	var collect func(*nethtml.Node)
++	collect = func(current *nethtml.Node) {
++		if current.Type == nethtml.ElementNode {
++			if reaction := issueLiveNodeAttribute(current, "data-reaction-content"); reaction != "" {
++				count := ""
++				if countNode := issueLiveFindDescendantByClass(current, "reaction-count"); countNode != nil {
++					count = strings.TrimSpace(issueLiveNodeText(countNode))
++				}
++				parts = append(parts, reaction+":"+issueLiveNodeAttribute(current, "data-has-reacted")+":"+count)
++				return
++			}
++		}
++		for child := current.FirstChild; child != nil; child = child.NextSibling {
++			collect(child)
++		}
++	}
++	collect(container)
++	sort.Strings(parts)
++	return strings.Join(parts, "|")
++}
++
++func issueLiveAttachmentState(node *nethtml.Node) string {
++	container := issueLiveFindDescendantByClass(node, "dropzone-attachments")
++	if container == nil {
++		return ""
++	}
++
++	links := make(map[string]struct{})
++	var collect func(*nethtml.Node)
++	collect = func(current *nethtml.Node) {
++		if current.Type == nethtml.ElementNode && current.Data == "a" {
++			if href := issueLiveNodeAttribute(current, "href"); href != "" {
++				links[href] = struct{}{}
++			}
++		}
++		for child := current.FirstChild; child != nil; child = child.NextSibling {
++			collect(child)
++		}
++	}
++	collect(container)
++
++	state := make([]string, 0, len(links))
++	for href := range links {
++		state = append(state, href)
++	}
++	sort.Strings(state)
++	return strings.Join(state, "|")
++}
++
++func issueLiveFindSnapshotNode(node *nethtml.Node) *nethtml.Node {
++	for _, attribute := range node.Attr {
++		if attribute.Key == "data-issue-live-snapshot" {
++			return node
++		}
++	}
++	for child := node.FirstChild; child != nil; child = child.NextSibling {
++		if found := issueLiveFindSnapshotNode(child); found != nil {
++			return found
++		}
++	}
++	return nil
++}
++
++func issueLiveRenderNode(node *nethtml.Node) (string, error) {
++	var rendered strings.Builder
++	if err := nethtml.Render(&rendered, node); err != nil {
++		return "", err
++	}
++	return rendered.String(), nil
++}
++
++func issueLiveParseSnapshot(rendered string) ([]issueLiveSnapshotEntry, error) {
++	document, err := nethtml.Parse(strings.NewReader(rendered))
++	if err != nil {
++		return nil, err
++	}
++	snapshot := issueLiveFindSnapshotNode(document)
++	if snapshot == nil {
++		return nil, errors.New("live timeline snapshot root was not rendered")
++	}
++
++	entries := make([]issueLiveSnapshotEntry, 0, 16)
++	seen := make(map[string]struct{})
++	previousCommentKey := ""
++	for node := snapshot.FirstChild; node != nil; node = node.NextSibling {
++		if node.Type != nethtml.ElementNode {
++			continue
++		}
++
++		key := issueLiveFindCommentKey(node)
++		if key != "" {
++			previousCommentKey = key
++		} else if previousCommentKey != "" && issueLiveNodeHasClass(node, "timeline-item") && issueLiveNodeHasClass(node, "commits-list") {
++			key = previousCommentKey + ":commits"
++		}
++		if key == "" {
++			continue
++		}
++		if _, exists := seen[key]; exists {
++			return nil, fmt.Errorf("duplicate live timeline key %q", key)
++		}
++		seen[key] = struct{}{}
++
++		html, err := issueLiveRenderNode(node)
++		if err != nil {
++			return nil, err
++		}
++		entries = append(entries, issueLiveSnapshotEntry{
++			Key:             key,
++			HTML:            html,
++			Hash:            sha256.Sum256([]byte(html)),
++			ContentVersion:  issueLiveFindDescendantAttribute(node, "data-content-version"),
++			ReactionState:   issueLiveReactionState(node),
++			AttachmentState: issueLiveAttachmentState(node),
++		})
++	}
++
++	for index := range entries {
++		if index+1 < len(entries) {
++			entries[index].BeforeKey = entries[index+1].Key
++		}
++	}
++	return entries, nil
++}
++
++func issueLiveHashString(hash [sha256.Size]byte) string {
++	return hex.EncodeToString(hash[:])
++}
++
++func issueLiveSnapshotStates(entries []issueLiveSnapshotEntry) map[string]issueLiveSnapshotState {
++	states := make(map[string]issueLiveSnapshotState, len(entries))
++	for _, entry := range entries {
++		states[entry.Key] = issueLiveSnapshotState{BeforeKey: entry.BeforeKey, Hash: entry.Hash}
++	}
++	return states
++}
++
++func issueLiveServerStates(entries []issueLiveSnapshotEntry, excluded map[string]struct{}) []issueLiveServerState {
++	states := make([]issueLiveServerState, 0, len(entries))
++	for _, entry := range entries {
++		if _, skip := excluded[entry.Key]; skip {
++			continue
++		}
++		states = append(states, issueLiveServerState{
++			Key:             entry.Key,
++			BeforeKey:       entry.BeforeKey,
++			Hash:            issueLiveHashString(entry.Hash),
++			ContentVersion:  entry.ContentVersion,
++			ReactionState:   entry.ReactionState,
++			AttachmentState: entry.AttachmentState,
++		})
++	}
++	return states
++}
++
++func issueLiveDecodeClientStates(states []issueLiveClientState) (map[string]issueLiveSnapshotState, error) {
++	if len(states) > 10000 {
++		return nil, errors.New("too many issue live resume states")
++	}
++	decoded := make(map[string]issueLiveSnapshotState, len(states))
++	for _, state := range states {
++		if state.Key == "" {
++			continue
++		}
++		hashBytes, err := hex.DecodeString(state.Hash)
++		if err != nil || len(hashBytes) != sha256.Size {
++			return nil, fmt.Errorf("invalid issue live hash for %q", state.Key)
++		}
++		var hash [sha256.Size]byte
++		copy(hash[:], hashBytes)
++		decoded[state.Key] = issueLiveSnapshotState{BeforeKey: state.BeforeKey, Hash: hash}
++	}
++	return decoded, nil
++}
++
++func issueLiveInitialSnapshotStates(clientStates []issueLiveClientState, entries []issueLiveSnapshotEntry) map[string]issueLiveSnapshotState {
++	serverEntries := make(map[string]issueLiveSnapshotEntry, len(entries))
++	for _, entry := range entries {
++		serverEntries[entry.Key] = entry
++	}
++
++	states := make(map[string]issueLiveSnapshotState, len(clientStates))
++	for _, clientState := range clientStates {
++		if clientState.Key == "" {
++			continue
++		}
++		state := issueLiveSnapshotState{BeforeKey: clientState.BeforeKey}
++		if entry, exists := serverEntries[clientState.Key]; exists &&
++			clientState.ContentVersion == entry.ContentVersion &&
++			clientState.ReactionState == entry.ReactionState &&
++			clientState.AttachmentState == entry.AttachmentState {
++			state.Hash = entry.Hash
++		}
++		states[clientState.Key] = state
++	}
++	return states
++}
++
++func issueLiveDiffSnapshot(previous map[string]issueLiveSnapshotState, entries []issueLiveSnapshotEntry) ([]issueLiveOperation, map[string]issueLiveSnapshotState) {
++	current := issueLiveSnapshotStates(entries)
++	operations := make([]issueLiveOperation, 0, len(entries))
++
++	for _, entry := range entries {
++		oldState, exists := previous[entry.Key]
++		if !exists || oldState.Hash != entry.Hash || oldState.BeforeKey != entry.BeforeKey {
++			operations = append(operations, issueLiveOperation{
++				Action:    "upsert",
++				Key:       entry.Key,
++				BeforeKey: entry.BeforeKey,
++				HTML:      entry.HTML,
++				Hash:      issueLiveHashString(entry.Hash),
++			})
++		}
++	}
++	for key := range previous {
++		if _, exists := current[key]; !exists {
++			operations = append(operations, issueLiveOperation{Action: "delete", Key: key})
++		}
++	}
++	return operations, current
++}
++
++func issueLiveWrite(ctx stdcontext.Context, conn *websocket.Conn, message issueLiveServerMessage) error {
++	payload, err := json.Marshal(message)
++	if err != nil {
++		return err
++	}
++
++	writeCtx, cancel := stdcontext.WithTimeout(ctx, issueLiveWriteTimeout)
++	defer cancel()
++	return conn.Write(writeCtx, websocket.MessageText, payload)
++}
++
++func issueLiveReadResume(ctx stdcontext.Context, conn *websocket.Conn) ([]issueLiveClientState, bool, error) {
++	readCtx, cancel := stdcontext.WithTimeout(ctx, issueLiveResumeTimeout)
++	defer cancel()
++	messageType, payload, err := conn.Read(readCtx)
++	if err != nil {
++		return nil, false, err
++	}
++	if messageType != websocket.MessageText {
++		return nil, false, errors.New("issue live resume message must be text")
++	}
++
++	var message issueLiveClientMessage
++	if err := json.Unmarshal(payload, &message); err != nil {
++		return nil, false, fmt.Errorf("decode issue live resume message: %w", err)
++	}
++	if message.Type != "resume" {
++		return nil, false, fmt.Errorf("unexpected first issue live message %q", message.Type)
++	}
++	if len(message.States) > 10000 {
++		return nil, false, errors.New("too many issue live resume states")
++	}
++	return message.States, message.Initialized, nil
++}
++
++func issueLiveReadLoop(ctx stdcontext.Context, cancel stdcontext.CancelFunc, conn *websocket.Conn, refresh chan<- struct{}) {
++	defer cancel()
++	for {
++		messageType, payload, err := conn.Read(ctx)
++		if err != nil {
++			return
++		}
++		if messageType != websocket.MessageText {
++			continue
++		}
++
++		var message issueLiveClientMessage
++		if json.Unmarshal(payload, &message) != nil || message.Type != "refresh" {
++			continue
++		}
++		select {
++		case refresh <- struct{}{}:
++		default:
++		}
++	}
++}
++
++// IssueLive serves incremental issue and pull-request timeline operations over
++// a WebSocket connection. Reconnects resume from content hashes, while a first
++// connection reconciles the page's lightweight structural state before storing
++// its baseline. Rendering is event-driven with a low-frequency safety refresh.
++func IssueLive(ctx *context.Context) {
++	connectionCtx, cancel := stdcontext.WithCancel(ctx.Req.Context())
++	defer cancel()
++	stopShutdownCancel := stdcontext.AfterFunc(graceful.GetManager().ShutdownContext(), cancel)
++	defer stopShutdownCancel()
++	ctx.Base.RequestContext = reqctx.FromContext(connectionCtx)
++	ctx.Req = ctx.Req.WithContext(connectionCtx)
++
++	refresh := make(chan struct{}, 1)
++	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
++	defer unregisterRefresh()
++
++	initialHTML, err := prepareIssueLiveSnapshot(ctx)
++	if err != nil {
++		ctx.ServerError("prepareIssueLiveSnapshot", err)
++		return
++	}
++	initialEntries, err := issueLiveParseSnapshot(initialHTML)
++	if err != nil {
++		ctx.ServerError("issueLiveParseSnapshot", err)
++		return
++	}
++	if ctx.Written() {
++		return
++	}
++
++	conn, err := websocket.Accept(ctx.Resp, ctx.Req, nil)
++	if err != nil {
++		log.Warn("Unable to accept issue live WebSocket: %v", err)
++		return
++	}
++	defer conn.CloseNow()
++	conn.SetReadLimit(issueLiveReadLimit)
++
++	clientStateList, initialized, err := issueLiveReadResume(connectionCtx, conn)
++	if err != nil {
++		if websocket.CloseStatus(err) == -1 && connectionCtx.Err() == nil {
++			log.Debug("Unable to read issue live resume state: %v", err)
++		}
++		return
++	}
++
++	var (
++		sequence       uint64
++		operations     []issueLiveOperation
++		previous       map[string]issueLiveSnapshotState
++		baselineStates []issueLiveServerState
++	)
++	if initialized {
++		clientStates, err := issueLiveDecodeClientStates(clientStateList)
++		if err != nil {
++			log.Debug("Unable to decode issue live resume state: %v", err)
++			return
++		}
++		operations, previous = issueLiveDiffSnapshot(clientStates, initialEntries)
++	} else {
++		initialStates := issueLiveInitialSnapshotStates(clientStateList, initialEntries)
++		operations, previous = issueLiveDiffSnapshot(initialStates, initialEntries)
++
++		changedKeys := make(map[string]struct{}, len(operations))
++		for _, operation := range operations {
++			if operation.Action == "upsert" {
++				changedKeys[operation.Key] = struct{}{}
++			}
++		}
++		baselineStates = issueLiveServerStates(initialEntries, changedKeys)
++	}
++	if len(operations) > 0 {
++		sequence++
++		if err := issueLiveWrite(connectionCtx, conn, issueLiveServerMessage{
++			Type:       "timeline",
++			Sequence:   sequence,
++			Operations: operations,
++		}); err != nil {
++			return
++		}
++	}
++	if baselineStates != nil {
++		// Send the baseline after the initial operations. WebSocket ordering lets
++		// the browser commit it only after those DOM changes have been applied.
++		if err := issueLiveWrite(connectionCtx, conn, issueLiveServerMessage{
++			Type:   "baseline",
++			States: baselineStates,
++		}); err != nil {
++			return
++		}
++	}
++
++	go issueLiveReadLoop(connectionCtx, cancel, conn, refresh)
++
++	refreshTicker := time.NewTicker(issueLiveSafetyRefreshInterval)
++	defer refreshTicker.Stop()
++	pingTicker := time.NewTicker(issueLivePingInterval)
++	defer pingTicker.Stop()
++
++	sendSnapshot := func(rendered string) error {
++		entries, err := issueLiveParseSnapshot(rendered)
++		if err != nil {
++			return err
++		}
++		operations, current := issueLiveDiffSnapshot(previous, entries)
++		previous = current
++		if len(operations) == 0 {
++			return nil
++		}
++
++		sequence++
++		return issueLiveWrite(connectionCtx, conn, issueLiveServerMessage{
++			Type:       "timeline",
++			Sequence:   sequence,
++			Operations: operations,
++		})
++	}
++
++	for {
++		select {
++		case <-connectionCtx.Done():
++			return
++		case <-refreshTicker.C:
++		case <-refresh:
++			// Collapse a burst of local changes into one template render.
++			for {
++				select {
++				case <-refresh:
++				default:
++					goto refreshTimeline
++				}
++			}
++		case <-pingTicker.C:
++			pingCtx, pingCancel := stdcontext.WithTimeout(connectionCtx, issueLiveWriteTimeout)
++			err := conn.Ping(pingCtx)
++			pingCancel()
++			if err != nil {
++				return
++			}
++			continue
++		}
++
++	refreshTimeline:
++		rendered, err := prepareIssueLiveSnapshot(ctx)
++		if err != nil {
++			if connectionCtx.Err() != nil {
++				return
++			}
++			log.Warn("Unable to refresh live timeline for %s: %v", ctx.Req.URL.Path, err)
++			continue
++		}
++		if err := sendSnapshot(rendered); err != nil {
++			if websocket.CloseStatus(err) == -1 && connectionCtx.Err() == nil {
++				log.Debug("Unable to write issue live snapshot: %v", err)
++			}
++			return
++		}
++	}
++}
+diff --git a/routers/web/repo/issue_live_hub.go b/routers/web/repo/issue_live_hub.go
+new file mode 100644
+index 0000000000..ea1b46756e
+--- /dev/null
++++ b/routers/web/repo/issue_live_hub.go
+@@ -0,0 +1,71 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package repo
++
++import (
++	"sync"
++
++	issues_model "gitea.dev/models/issues"
++)
++
++type issueLiveTopic struct {
++	repoID int64
++	index  int64
++}
++
++var issueLiveRefreshHub = struct {
++	sync.RWMutex
++	subscribers map[issueLiveTopic]map[chan struct{}]struct{}
++}{
++	subscribers: make(map[issueLiveTopic]map[chan struct{}]struct{}),
++}
++
++func registerIssueLiveRefresh(repoID, index int64, refresh chan struct{}) func() {
++	topic := issueLiveTopic{repoID: repoID, index: index}
++
++	issueLiveRefreshHub.Lock()
++	subscribers := issueLiveRefreshHub.subscribers[topic]
++	if subscribers == nil {
++		subscribers = make(map[chan struct{}]struct{})
++		issueLiveRefreshHub.subscribers[topic] = subscribers
++	}
++	subscribers[refresh] = struct{}{}
++	issueLiveRefreshHub.Unlock()
++
++	return func() {
++		issueLiveRefreshHub.Lock()
++		if subscribers := issueLiveRefreshHub.subscribers[topic]; subscribers != nil {
++			delete(subscribers, refresh)
++			if len(subscribers) == 0 {
++				delete(issueLiveRefreshHub.subscribers, topic)
++			}
++		}
++		issueLiveRefreshHub.Unlock()
++	}
++}
++
++func notifyIssueLive(repoID, index int64) {
++	topic := issueLiveTopic{repoID: repoID, index: index}
++
++	issueLiveRefreshHub.RLock()
++	defer issueLiveRefreshHub.RUnlock()
++	for refresh := range issueLiveRefreshHub.subscribers[topic] {
++		select {
++		case refresh <- struct{}{}:
++		default:
++		}
++	}
++}
++
++func notifyIssueLiveIssue(issue *issues_model.Issue) {
++	if issue != nil {
++		notifyIssueLive(issue.RepoID, issue.Index)
++	}
++}
++
++func notifyIssueLiveIssues(issues issues_model.IssueList) {
++	for _, issue := range issues {
++		notifyIssueLiveIssue(issue)
++	}
++}
+diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
+new file mode 100644
+index 0000000000..445cec3a70
+--- /dev/null
++++ b/routers/web/repo/issue_live_test.go
+@@ -0,0 +1,171 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package repo
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestIssueLiveParseSnapshot(t *testing.T) {
++	entries, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item comment issue-content-comment" id="issue-4">issue</div>
++	<div class="timeline-item event" id="issuecomment-10">event</div>
++	<div class="timeline-item commits-list"><div id="issuecomment-10-0">commit</div></div>
++	<div class="timeline-item-group"><div class="timeline-item" id="issuecomment-11">review</div></div>
++	<div class="timeline-item event">unkeyed event</div>
++</div>`)
++	require.NoError(t, err)
++	require.Len(t, entries, 4)
++
++	assert.Equal(t, "issue-4", entries[0].Key)
++	assert.Equal(t, "issuecomment-10", entries[1].Key)
++	assert.Equal(t, "issuecomment-10:commits", entries[2].Key)
++	assert.Equal(t, "issuecomment-11", entries[3].Key)
++
++	assert.Equal(t, entries[1].Key, entries[0].BeforeKey)
++	assert.Equal(t, entries[2].Key, entries[1].BeforeKey)
++	assert.Equal(t, entries[3].Key, entries[2].BeforeKey)
++	assert.Empty(t, entries[3].BeforeKey)
++}
++
++func TestIssueLiveParseSnapshotRejectsDuplicateKeys(t *testing.T) {
++	_, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++	<div class="timeline-item event" id="issuecomment-10">second</div>
++</div>`)
++	require.ErrorContains(t, err, `duplicate live timeline key "issuecomment-10"`)
++}
++
++func TestIssueLiveDiffSnapshot(t *testing.T) {
++	initial, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++	<div class="timeline-item event" id="issuecomment-11">second</div>
++</div>`)
++	require.NoError(t, err)
++	previous := issueLiveSnapshotStates(initial)
++
++	updated, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first edited</div>
++	<div class="timeline-item event" id="issuecomment-12">third</div>
++</div>`)
++	require.NoError(t, err)
++
++	operations, _ := issueLiveDiffSnapshot(previous, updated)
++	require.Len(t, operations, 3)
++	assert.Equal(t, issueLiveOperation{
++		Action:    "upsert",
++		Key:       "issuecomment-10",
++		BeforeKey: "issuecomment-12",
++		HTML:      updated[0].HTML,
++		Hash:      issueLiveHashString(updated[0].Hash),
++	}, operations[0])
++	assert.Equal(t, issueLiveOperation{
++		Action: "upsert",
++		Key:    "issuecomment-12",
++		HTML:   updated[1].HTML,
++		Hash:   issueLiveHashString(updated[1].Hash),
++	}, operations[1])
++	assert.Equal(t, issueLiveOperation{Action: "delete", Key: "issuecomment-11"}, operations[2])
++}
++
++func TestIssueLiveDiffSnapshotDetectsReorder(t *testing.T) {
++	initial, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++	<div class="timeline-item event" id="issuecomment-11">second</div>
++</div>`)
++	require.NoError(t, err)
++
++	reordered, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-11">second</div>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++</div>`)
++	require.NoError(t, err)
++
++	operations, _ := issueLiveDiffSnapshot(issueLiveSnapshotStates(initial), reordered)
++	require.Len(t, operations, 2)
++	assert.Equal(t, "issuecomment-11", operations[0].Key)
++	assert.Equal(t, "issuecomment-10", operations[0].BeforeKey)
++	assert.Equal(t, "issuecomment-10", operations[1].Key)
++	assert.Empty(t, operations[1].BeforeKey)
++}
++
++func TestIssueLiveClientStateRoundTrip(t *testing.T) {
++	entries, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++	<div class="timeline-item event" id="issuecomment-11">second</div>
++</div>`)
++	require.NoError(t, err)
++
++	serverStates := issueLiveServerStates(entries, nil)
++	clientStates := make([]issueLiveClientState, 0, len(serverStates))
++	for _, state := range serverStates {
++		clientStates = append(clientStates, issueLiveClientState{
++			Key:             state.Key,
++			BeforeKey:       state.BeforeKey,
++			Hash:            state.Hash,
++			ContentVersion:  state.ContentVersion,
++			ReactionState:   state.ReactionState,
++			AttachmentState: state.AttachmentState,
++		})
++	}
++
++	decoded, err := issueLiveDecodeClientStates(clientStates)
++	require.NoError(t, err)
++	assert.Equal(t, issueLiveSnapshotStates(entries), decoded)
++}
++
++func TestIssueLiveDecodeClientStatesRejectsInvalidHash(t *testing.T) {
++	_, err := issueLiveDecodeClientStates([]issueLiveClientState{{Key: "issuecomment-10", Hash: "invalid"}})
++	require.ErrorContains(t, err, `invalid issue live hash for "issuecomment-10"`)
++}
++
++func TestIssueLiveInitialSnapshotStates(t *testing.T) {
++	entries, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item comment" id="issuecomment-10">
++		<div class="edit-content-zone" data-content-version="3"></div>
++		<div class="bottom-reactions">
++			<a data-reaction-content="+1" data-has-reacted="true"><span class="reaction-count">2</span></a>
++		</div>
++		<div class="dropzone-attachments"><a href="/attachments/a">a</a></div>
++	</div>
++</div>`)
++	require.NoError(t, err)
++	require.Len(t, entries, 1)
++
++	matching := []issueLiveClientState{{
++		Key:             entries[0].Key,
++		ContentVersion:  entries[0].ContentVersion,
++		ReactionState:   entries[0].ReactionState,
++		AttachmentState: entries[0].AttachmentState,
++	}}
++	assert.Equal(t, entries[0].Hash, issueLiveInitialSnapshotStates(matching, entries)[entries[0].Key].Hash)
++
++	changed := append([]issueLiveClientState(nil), matching...)
++	changed[0].ContentVersion = "2"
++	assert.Zero(t, issueLiveInitialSnapshotStates(changed, entries)[entries[0].Key].Hash)
++}
++
++func TestIssueLiveServerStatesCanExcludePendingUpserts(t *testing.T) {
++	entries, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item event" id="issuecomment-10">first</div>
++	<div class="timeline-item event" id="issuecomment-11">second</div>
++</div>`)
++	require.NoError(t, err)
++
++	states := issueLiveServerStates(entries, map[string]struct{}{"issuecomment-11": {}})
++	require.Len(t, states, 1)
++	assert.Equal(t, "issuecomment-10", states[0].Key)
++}
+diff --git a/routers/web/web.go b/routers/web/web.go
+index 0bfae44e86..e0bee980d8 100644
+--- a/routers/web/web.go
++++ b/routers/web/web.go
+@@ -1296,6 +1296,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+ 		m.Get("/posters", repo.IssuePullPosters)
+ 		m.Group("/{index}", func() {
+ 			m.Get("/info", repo.GetIssueInfo)
++			m.Get("/live", repo.IssueLive)
+ 			m.Get("/attachments", repo.GetIssueAttachments)
+ 			m.Get("/attachments/{uuid}", repo.GetAttachment)
+ 			m.Group("/content-history", func() {
+diff --git a/templates/repo/issue/view_content.tmpl b/templates/repo/issue/view_content.tmpl
+index eaee1d8773..d4788329c7 100644
+--- a/templates/repo/issue/view_content.tmpl
++++ b/templates/repo/issue/view_content.tmpl
+@@ -1,69 +1,7 @@
+ <div class="issue-content">
+-	{{$createdStr:= DateUtils.TimeSince .Issue.CreatedUnix}}
+ 	<div class="issue-content-left">
+ 		<div class="comment-list">
+-			<div id="{{.Issue.HashTag}}" class="timeline-item comment issue-content-comment">
+-				{{if .Issue.OriginalAuthor}}
+-				<span class="timeline-avatar">
+-					{{ctx.AvatarUtils.Avatar nil 40}}
+-				</span>
+-				{{else}}
+-				<a class="timeline-avatar" {{if gt .Issue.Poster.ID 0}}href="{{.Issue.Poster.HomeLink}}"{{end}}>
+-					{{ctx.AvatarUtils.Avatar .Issue.Poster 40}}
+-				</a>
+-				{{end}}
+-				<div class="content comment-container">
+-					<div class="comment-header avatar-content-left-arrow" role="heading" aria-level="3">
+-						<div class="comment-header-left">
+-							{{if .Issue.OriginalAuthor}}
+-								<span class="tw-text-text tw-font-semibold">
+-									{{svg (MigrationIcon .Repository.GetOriginalURLHostname)}}
+-									{{.Issue.OriginalAuthor}}
+-								</span>
+-								<span class="tw-text-text-light muted-links">
+-									{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
+-								</span>
+-								<span class="text migrate">
+-									{{if .Repository.OriginalURL}} ({{ctx.Locale.Tr "repo.migrated_from" .Repository.OriginalURL .Repository.GetOriginalURLHostname}}){{end}}
+-								</span>
+-							{{else}}
+-								<a class="inline-timeline-avatar" href="{{.Issue.Poster.HomeLink}}">
+-									{{ctx.AvatarUtils.Avatar .Issue.Poster 24}}
+-								</a>
+-								<span class="tw-text-text-light muted-links">
+-									{{template "shared/user/authorlink" .Issue.Poster}}
+-									{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
+-								</span>
+-							{{end}}
+-						</div>
+-						<div class="comment-header-right">
+-							{{template "repo/issue/view_content/show_role" dict "ShowRole" .Issue.ShowRole "IgnorePoster" true}}
+-							{{if not $.Repository.IsArchived}}
+-								{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
+-							{{end}}
+-							{{template "repo/issue/view_content/context_menu" dict "item" .Issue "delete" false "issue" true "diff" false "IsCommentPoster" $.IsIssuePoster}}
+-						</div>
+-					</div>
+-					<div class="ui attached segment comment-body" role="article">
+-						<div class="render-content markup" {{if or $.Permission.IsAdmin $.HasIssuesOrPullsWritePermission $.IsIssuePoster}}data-can-edit="true"{{end}}>
+-							{{if .Issue.RenderedContent}}
+-								{{.Issue.RenderedContent}}
+-							{{else}}
+-								<span class="no-content">{{ctx.Locale.Tr "repo.issues.no_content"}}</span>
+-							{{end}}
+-						</div>
+-						<div id="{{.Issue.HashTag}}-raw" class="raw-content tw-hidden">{{.Issue.Content}}</div>
+-						<div class="edit-content-zone tw-hidden" data-update-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/content" data-content-version="{{.Issue.ContentVersion}}" data-context="{{.RepoLink}}" data-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/attachments" data-view-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/view-attachments"></div>
+-						{{if .Issue.Attachments}}
+-							{{template "repo/issue/view_content/attachments" dict "Attachments" .Issue.Attachments "RenderedContent" .Issue.RenderedContent}}
+-						{{end}}
+-					</div>
+-					{{$reactions := .Issue.Reactions.GroupByType}}
+-					{{if $reactions}}
+-						{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
+-					{{end}}
+-				</div>
+-			</div>
++			{{template "repo/issue/view_content/issue_comment" .}}
+ 
+ 			{{template "repo/issue/view_content/comments" .}}
+ 			<div class="timeline-item tw-hidden" id="timeline-comments-end"></div>
+diff --git a/templates/repo/issue/view_content/comments_live.tmpl b/templates/repo/issue/view_content/comments_live.tmpl
+new file mode 100644
+index 0000000000..6b9a55fb2a
+--- /dev/null
++++ b/templates/repo/issue/view_content/comments_live.tmpl
+@@ -0,0 +1,4 @@
++<div data-issue-live-snapshot>
++	{{template "repo/issue/view_content/issue_comment" .}}
++	{{template "repo/issue/view_content/comments" .}}
++</div>
+diff --git a/templates/repo/issue/view_content/issue_comment.tmpl b/templates/repo/issue/view_content/issue_comment.tmpl
+new file mode 100644
+index 0000000000..2a8b74c80c
+--- /dev/null
++++ b/templates/repo/issue/view_content/issue_comment.tmpl
+@@ -0,0 +1,63 @@
++{{$createdStr:= DateUtils.TimeSince .Issue.CreatedUnix}}
++<div id="{{.Issue.HashTag}}" class="timeline-item comment issue-content-comment">
++	{{if .Issue.OriginalAuthor}}
++	<span class="timeline-avatar">
++		{{ctx.AvatarUtils.Avatar nil 40}}
++	</span>
++	{{else}}
++	<a class="timeline-avatar" {{if gt .Issue.Poster.ID 0}}href="{{.Issue.Poster.HomeLink}}"{{end}}>
++		{{ctx.AvatarUtils.Avatar .Issue.Poster 40}}
++	</a>
++	{{end}}
++	<div class="content comment-container">
++		<div class="comment-header avatar-content-left-arrow" role="heading" aria-level="3">
++			<div class="comment-header-left">
++				{{if .Issue.OriginalAuthor}}
++					<span class="tw-text-text tw-font-semibold">
++						{{svg (MigrationIcon .Repository.GetOriginalURLHostname)}}
++						{{.Issue.OriginalAuthor}}
++					</span>
++					<span class="tw-text-text-light muted-links">
++						{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
++					</span>
++					<span class="text migrate">
++						{{if .Repository.OriginalURL}} ({{ctx.Locale.Tr "repo.migrated_from" .Repository.OriginalURL .Repository.GetOriginalURLHostname}}){{end}}
++					</span>
++				{{else}}
++					<a class="inline-timeline-avatar" href="{{.Issue.Poster.HomeLink}}">
++						{{ctx.AvatarUtils.Avatar .Issue.Poster 24}}
++					</a>
++					<span class="tw-text-text-light muted-links">
++						{{template "shared/user/authorlink" .Issue.Poster}}
++						{{ctx.Locale.Tr "repo.issues.commented_at" .Issue.HashTag $createdStr}}
++					</span>
++				{{end}}
++			</div>
++			<div class="comment-header-right">
++				{{template "repo/issue/view_content/show_role" dict "ShowRole" .Issue.ShowRole "IgnorePoster" true}}
++				{{if not $.Repository.IsArchived}}
++					{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
++				{{end}}
++				{{template "repo/issue/view_content/context_menu" dict "item" .Issue "delete" false "issue" true "diff" false "IsCommentPoster" $.IsIssuePoster}}
++			</div>
++		</div>
++		<div class="ui attached segment comment-body" role="article">
++			<div class="render-content markup" {{if or $.Permission.IsAdmin $.HasIssuesOrPullsWritePermission $.IsIssuePoster}}data-can-edit="true"{{end}}>
++				{{if .Issue.RenderedContent}}
++					{{.Issue.RenderedContent}}
++				{{else}}
++					<span class="no-content">{{ctx.Locale.Tr "repo.issues.no_content"}}</span>
++				{{end}}
++			</div>
++			<div id="{{.Issue.HashTag}}-raw" class="raw-content tw-hidden">{{.Issue.Content}}</div>
++			<div class="edit-content-zone tw-hidden" data-update-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/content" data-content-version="{{.Issue.ContentVersion}}" data-context="{{.RepoLink}}" data-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/attachments" data-view-attachment-url="{{$.RepoLink}}/issues/{{.Issue.Index}}/view-attachments"></div>
++			{{if .Issue.Attachments}}
++				{{template "repo/issue/view_content/attachments" dict "Attachments" .Issue.Attachments "RenderedContent" .Issue.RenderedContent}}
++			{{end}}
++		</div>
++		{{$reactions := .Issue.Reactions.GroupByType}}
++		{{if $reactions}}
++			{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
++		{{end}}
++	</div>
++</div>
+diff --git a/web_src/js/features/comp/ReactionSelector.ts b/web_src/js/features/comp/ReactionSelector.ts
+index efc592597a..2016a53c43 100644
+--- a/web_src/js/features/comp/ReactionSelector.ts
++++ b/web_src/js/features/comp/ReactionSelector.ts
+@@ -1,6 +1,8 @@
+ import {POST} from '../../modules/fetch.ts';
+ import {registerGlobalEventFunc} from '../../modules/observer.ts';
+ 
++export const issueLiveRefreshEvent = 'gitea:issue-live-refresh';
++
+ export function initCompReactionSelector() {
+   registerGlobalEventFunc('click', 'onCommentReactionButtonClick', async (target: HTMLElement, e: Event) => {
+     // there are 2 places for the "reaction" buttons, one is the top-right reaction menu, one is the bottom of the comment
+@@ -26,5 +28,9 @@ export function initCompReactionSelector() {
+     if (data.html) {
+       commentContainer.insertAdjacentHTML('beforeend', data.html);
+     }
++
++    // Ask the page-owned socket to reconcile immediately. Other sessions are
++    // invalidated by the server-side issue live hub.
++    document.dispatchEvent(new CustomEvent(issueLiveRefreshEvent));
+   });
+ }
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+new file mode 100644
+index 0000000000..e985b35cb8
+--- /dev/null
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -0,0 +1,631 @@
++import {Idiomorph} from 'idiomorph';
++import {errorMessage} from '../modules/errors.ts';
++import {request} from '../modules/fetch.ts';
++import {showErrorToast} from '../modules/toast.ts';
++import {getComboMarkdownEditor} from './comp/ComboMarkdownEditor.ts';
++import {issueLiveRefreshEvent} from './comp/ReactionSelector.ts';
++
++const timelineItemIdPattern = /^(?:issue|pull)(?:comment)?-\d+$/;
++const hiddenSocketSuspendDelay = 15000;
++const pendingOperations = new Map<string, IssueLiveOperation>();
++const operationBatches: IssueLiveOperation[][] = [];
++const synchronizedStates = new Map<string, IssueLiveState>();
++let pendingBaselineStates: IssueLiveState[] | null = null;
++let synchronizedBaseline = false;
++let operationFrame: number | null = null;
++
++type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
++
++type IssueLiveState = {
++  key: string,
++  beforeKey?: string,
++  hash?: string,
++  contentVersion?: string,
++  reactionState?: string,
++  attachmentState?: string,
++};
++
++type IssueLiveOperation = {
++  action: 'upsert' | 'delete',
++  key: string,
++  beforeKey?: string,
++  html?: string,
++  hash?: string,
++};
++
++type IssueLiveServerMessage = {
++  type: 'timeline' | 'baseline',
++  sequence?: number,
++  operations?: IssueLiveOperation[],
++  states?: IssueLiveState[],
++};
++
++type IssueLiveClientMessage = {
++  type: 'resume',
++  initialized: boolean,
++  states: IssueLiveState[],
++};
++
++type TimelineEntry = {
++  key: string,
++  element: HTMLElement,
++};
++
++class IssueLiveSocket {
++  url: string;
++  socket: WebSocket | null = null;
++  reconnectTimer: number | null = null;
++  reconnectDelay = 1000;
++  pendingRefresh = false;
++  suspended = false;
++  stopped = false;
++  onMessage: (message: IssueLiveServerMessage) => void;
++  onState: (state: ConnectionState) => void;
++  getResumeMessage: () => IssueLiveClientMessage;
++
++  constructor(
++    url: string,
++    onMessage: (message: IssueLiveServerMessage) => void,
++    onState: (state: ConnectionState) => void,
++    getResumeMessage: () => IssueLiveClientMessage,
++  ) {
++    this.url = url;
++    this.onMessage = onMessage;
++    this.onState = onState;
++    this.getResumeMessage = getResumeMessage;
++  }
++
++  start() {
++    this.stopped = false;
++    this.suspended = false;
++    this.connect();
++  }
++
++  connect() {
++    if (this.stopped || this.suspended) return;
++    if (this.socket?.readyState === WebSocket.CONNECTING || this.socket?.readyState === WebSocket.OPEN) return;
++
++    this.cancelReconnect();
++    this.onState('connecting');
++    const socket = new WebSocket(this.url);
++    this.socket = socket;
++
++    socket.addEventListener('open', () => {
++      if (this.socket !== socket) return;
++      try {
++        socket.send(JSON.stringify(this.getResumeMessage()));
++      } catch (error) {
++        console.error('Unable to send issue live resume state', error);
++        socket.close(1011, 'Unable to resume');
++        return;
++      }
++      this.reconnectDelay = 1000;
++      this.onState('open');
++      if (this.pendingRefresh) {
++        this.pendingRefresh = false;
++        this.refresh();
++      }
++    });
++
++    socket.addEventListener('message', (event) => {
++      if (this.socket !== socket) return;
++      try {
++        this.onMessage(JSON.parse(String(event.data)) as IssueLiveServerMessage);
++      } catch (error) {
++        console.error('Unable to decode issue live message', error);
++      }
++    });
++
++    socket.addEventListener('error', () => {
++      if (this.socket === socket) this.onState('error');
++    });
++
++    socket.addEventListener('close', () => {
++      if (this.socket !== socket) return;
++      this.socket = null;
++      this.onState('closed');
++      this.scheduleReconnect();
++    });
++  }
++
++  scheduleReconnect() {
++    if (this.stopped || this.suspended || this.reconnectTimer !== null) return;
++    const jitter = 0.8 + Math.random() * 0.4;
++    const delay = Math.round(this.reconnectDelay * jitter);
++    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
++    this.reconnectTimer = window.setTimeout(() => {
++      this.reconnectTimer = null;
++      this.connect();
++    }, delay);
++  }
++
++  cancelReconnect() {
++    if (this.reconnectTimer === null) return;
++    window.clearTimeout(this.reconnectTimer);
++    this.reconnectTimer = null;
++  }
++
++  refresh() {
++    if (this.socket?.readyState === WebSocket.OPEN) {
++      this.socket.send(JSON.stringify({type: 'refresh'}));
++    } else {
++      this.pendingRefresh = true;
++      this.connect();
++    }
++  }
++
++  suspend() {
++    if (this.suspended) return;
++    this.suspended = true;
++    this.cancelReconnect();
++    const socket = this.socket;
++    this.socket = null;
++    socket?.close(1000, 'Page hidden');
++    this.onState('closed');
++  }
++
++  resume() {
++    if (this.stopped) return;
++    this.suspended = false;
++    this.connect();
++    this.refresh();
++  }
++
++  close() {
++    this.stopped = true;
++    this.suspended = true;
++    this.cancelReconnect();
++    const socket = this.socket;
++    this.socket = null;
++    socket?.close(1000, 'Page closed');
++    this.onState('closed');
++  }
++}
++
++function issueLiveUrl() {
++  const path = window.location.pathname.replace(/\/+$/, '');
++  const url = new URL(`${path}/live`, window.location.origin);
++  url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
++  return url.toString();
++}
++
++function ensureConnectionIndicator() {
++  let indicator = document.querySelector<HTMLElement>('#issue-live-connection-status');
++  if (indicator) return indicator;
++
++  indicator = document.createElement('span');
++  indicator.id = 'issue-live-connection-status';
++  indicator.className = 'tw-float-right tw-p-1 tw-text-xs tw-text-text-light';
++  indicator.setAttribute('role', 'status');
++  indicator.setAttribute('aria-live', 'polite');
++  document.querySelector('#timeline-comments-end')?.before(indicator);
++  return indicator;
++}
++
++function updateConnectionIndicator(state: ConnectionState) {
++  const indicator = ensureConnectionIndicator();
++  indicator.dataset.state = state;
++  indicator.classList.remove('tw-text-green', 'tw-text-orange', 'tw-text-red');
++
++  if (state === 'open') {
++    indicator.textContent = '●';
++    indicator.title = 'Live updates connected';
++    indicator.classList.add('tw-text-green');
++  } else if (state === 'error') {
++    indicator.textContent = '●';
++    indicator.title = 'Live updates connection error';
++    indicator.classList.add('tw-text-red');
++  } else {
++    indicator.textContent = '○';
++    indicator.title = state === 'connecting' ? 'Connecting live updates' : 'Live updates disconnected';
++    indicator.classList.add('tw-text-orange');
++  }
++  indicator.setAttribute('aria-label', indicator.title);
++}
++
++function timelineCommentId(element: HTMLElement) {
++  if (timelineItemIdPattern.test(element.id)) return element.id;
++
++  for (const child of element.querySelectorAll<HTMLElement>('[id]')) {
++    if (timelineItemIdPattern.test(child.id)) return child.id;
++  }
++  return null;
++}
++
++function collectTimelineEntries(elements: Iterable<HTMLElement>): TimelineEntry[] {
++  const result: TimelineEntry[] = [];
++  let previousCommentKey: string | null = null;
++
++  for (const element of elements) {
++    let key = timelineCommentId(element);
++    if (key) {
++      previousCommentKey = key;
++    } else if (previousCommentKey && element.matches('.timeline-item.commits-list')) {
++      key = `${previousCommentKey}:commits`;
++    }
++
++    if (!key) continue;
++    element.dataset.issueLiveKey = key;
++    result.push({key, element});
++  }
++  return result;
++}
++
++function currentTimelineEntries(commentList: HTMLElement, timelineEnd: HTMLElement) {
++  const elements: HTMLElement[] = [];
++  for (const element of commentList.children) {
++    if (element === timelineEnd) break;
++    if (element instanceof HTMLElement) elements.push(element);
++  }
++  return collectTimelineEntries(elements);
++}
++
++function timelineReactionState(element: HTMLElement) {
++  const parts = [...element.querySelectorAll<HTMLElement>('.bottom-reactions [data-reaction-content]')].map((reaction) => {
++    const content = reaction.dataset.reactionContent ?? '';
++    const reacted = reaction.dataset.hasReacted ?? '';
++    const count = reaction.querySelector<HTMLElement>('.reaction-count')?.textContent?.trim() ?? '';
++    return `${content}:${reacted}:${count}`;
++  });
++  parts.sort();
++  return parts.join('|');
++}
++
++function timelineAttachmentState(element: HTMLElement) {
++  const links = new Set<string>();
++  for (const link of element.querySelectorAll<HTMLAnchorElement>('.dropzone-attachments a[href]')) {
++    const href = link.getAttribute('href');
++    if (href) links.add(href);
++  }
++  return [...links].sort().join('|');
++}
++
++function initialResumeStates(): IssueLiveState[] {
++  const timelineEnd = document.querySelector<HTMLElement>('#timeline-comments-end');
++  const commentList = timelineEnd?.closest<HTMLElement>('.comment-list');
++  if (!timelineEnd || !commentList) return [];
++
++  const entries = currentTimelineEntries(commentList, timelineEnd);
++  return entries.map((entry, index) => ({
++    key: entry.key,
++    beforeKey: entries[index + 1]?.key,
++    contentVersion: entry.element.querySelector<HTMLElement>('.edit-content-zone')?.dataset.contentVersion,
++    reactionState: timelineReactionState(entry.element),
++    attachmentState: timelineAttachmentState(entry.element),
++  }));
++}
++
++function isEditingTimelineEntry(element: HTMLElement) {
++  for (const editZone of element.querySelectorAll<HTMLElement>('.edit-content-zone')) {
++    if (!editZone.classList.contains('tw-hidden')) return true;
++  }
++  return false;
++}
++
++function animateInsertedEntry(element: HTMLElement) {
++  if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
++  element.animate([{opacity: 0}, {opacity: 1}], {duration: 180, easing: 'ease-out'});
++}
++
++function parseOperationElement(operation: IssueLiveOperation) {
++  if (!operation.html) return null;
++
++  const template = document.createElement('template');
++  template.innerHTML = operation.html;
++  const element = template.content.firstElementChild;
++  if (!(element instanceof HTMLElement)) return null;
++  element.dataset.issueLiveKey = operation.key;
++  return element;
++}
++
++function queuePendingOperation(operation: IssueLiveOperation) {
++  pendingOperations.set(operation.key, operation);
++}
++
++function morphElement(existing: HTMLElement, incoming: HTMLElement) {
++  if (existing.outerHTML === incoming.outerHTML) return;
++  Idiomorph.morph(existing, incoming, {
++    morphStyle: 'outerHTML',
++    callbacks: {
++      // Fomantic stores module state and handlers on these nodes. Preserve
++      // their identity; global observers initialize newly inserted controls.
++      beforeNodeMorphed(oldNode: Node) {
++        return !(oldNode instanceof HTMLElement && oldNode.matches('.comment-header-right, .ui.dropdown'));
++      },
++    },
++  });
++}
++
++function syncBottomReactions(existing: HTMLElement, incoming: HTMLElement) {
++  const existingContainer = existing.querySelector<HTMLElement>(':scope > .content.comment-container');
++  const incomingContainer = incoming.querySelector<HTMLElement>(':scope > .content.comment-container');
++  if (!existingContainer || !incomingContainer) return;
++
++  const existingReactions = existingContainer.querySelector<HTMLElement>(':scope > .bottom-reactions');
++  const incomingReactions = incomingContainer.querySelector<HTMLElement>(':scope > .bottom-reactions');
++
++  if (existingReactions && incomingReactions) {
++    existingReactions.replaceWith(incomingReactions);
++  } else if (existingReactions) {
++    existingReactions.remove();
++  } else if (incomingReactions) {
++    existingContainer.append(incomingReactions);
++  }
++}
++
++function morphCommentEntry(existing: HTMLElement, incoming: HTMLElement) {
++  const existingHeaderLeft = existing.querySelector<HTMLElement>('.comment-header-left');
++  const incomingHeaderLeft = incoming.querySelector<HTMLElement>('.comment-header-left');
++  if (existingHeaderLeft && incomingHeaderLeft) morphElement(existingHeaderLeft, incomingHeaderLeft);
++
++  const existingBody = existing.querySelector<HTMLElement>('.comment-body');
++  const incomingBody = incoming.querySelector<HTMLElement>('.comment-body');
++  if (existingBody && incomingBody) morphElement(existingBody, incomingBody);
++
++  syncBottomReactions(existing, incoming);
++}
++
++function morphTimelineEntry(existing: HTMLElement, incoming: HTMLElement) {
++  if (existing.matches('.timeline-item.comment') && incoming.matches('.timeline-item.comment')) {
++    morphCommentEntry(existing, incoming);
++    return;
++  }
++  morphElement(existing, incoming);
++}
++
++function positionTimelineEntry(
++  element: HTMLElement,
++  beforeKey: string | undefined,
++  currentByKey: Map<string, HTMLElement>,
++  timelineEnd: HTMLElement,
++) {
++  const anchor = (beforeKey ? currentByKey.get(beforeKey) : null) ?? timelineEnd;
++  if (anchor === element) return;
++  if (element.nextElementSibling === anchor) return;
++  anchor.before(element);
++}
++
++function visibleScrollAnchor(entries: TimelineEntry[]) {
++  let fallback: TimelineEntry | null = null;
++  for (const entry of entries) {
++    const rect = entry.element.getBoundingClientRect();
++    if (rect.bottom <= 0) continue;
++    fallback ??= entry;
++    if (rect.top >= 0) return {element: entry.element, top: rect.top};
++  }
++  if (!fallback) return null;
++  return {element: fallback.element, top: fallback.element.getBoundingClientRect().top};
++}
++
++function applyTimelineOperations(operations: IssueLiveOperation[]) {
++  const timelineEnd = document.querySelector<HTMLElement>('#timeline-comments-end');
++  const commentList = timelineEnd?.closest<HTMLElement>('.comment-list');
++  if (!timelineEnd || !commentList) return;
++
++  const current = currentTimelineEntries(commentList, timelineEnd);
++  const currentByKey = new Map(current.map((entry) => [entry.key, entry.element]));
++  const scrollAnchor = visibleScrollAnchor(current);
++  const positionOperations: IssueLiveOperation[] = [];
++
++  for (const operation of operations) {
++    const existing = currentByKey.get(operation.key);
++
++    if (operation.action === 'delete') {
++      if (existing && isEditingTimelineEntry(existing)) {
++        queuePendingOperation(operation);
++        continue;
++      }
++      existing?.remove();
++      currentByKey.delete(operation.key);
++      synchronizedStates.delete(operation.key);
++      continue;
++    }
++
++    const incoming = parseOperationElement(operation);
++    if (!incoming) continue;
++
++    if (existing) {
++      if (isEditingTimelineEntry(existing)) {
++        queuePendingOperation(operation);
++        continue;
++      }
++      morphTimelineEntry(existing, incoming);
++    } else {
++      timelineEnd.before(incoming);
++      currentByKey.set(operation.key, incoming);
++      animateInsertedEntry(incoming);
++    }
++
++    positionOperations.push(operation);
++    if (operation.hash) {
++      synchronizedStates.set(operation.key, {
++        key: operation.key,
++        beforeKey: operation.beforeKey,
++        hash: operation.hash,
++      });
++    }
++  }
++
++  // Position from the end towards the beginning so chains of newly inserted
++  // entries always have their next anchor in the document already.
++  for (const operation of [...positionOperations].reverse()) {
++    const element = currentByKey.get(operation.key);
++    if (element) positionTimelineEntry(element, operation.beforeKey, currentByKey, timelineEnd);
++  }
++
++  if (scrollAnchor?.element.isConnected) {
++    const offset = scrollAnchor.element.getBoundingClientRect().top - scrollAnchor.top;
++    if (offset) window.scrollBy(0, offset);
++  }
++}
++function applyPendingBaseline() {
++  if (!pendingBaselineStates || operationFrame !== null || operationBatches.length) return;
++
++  synchronizedStates.clear();
++  for (const state of pendingBaselineStates) synchronizedStates.set(state.key, state);
++  pendingBaselineStates = null;
++  synchronizedBaseline = true;
++}
++
++function flushOperationBatches() {
++  operationFrame = null;
++  const operations = operationBatches.shift();
++  if (operations) applyTimelineOperations(operations);
++  if (operationBatches.length) {
++    operationFrame = window.requestAnimationFrame(flushOperationBatches);
++  } else {
++    applyPendingBaseline();
++  }
++}
++
++function enqueueTimelineOperations(operations: IssueLiveOperation[]) {
++  if (!operations.length) return;
++  operationBatches.push(operations);
++  if (operationFrame === null) operationFrame = window.requestAnimationFrame(flushOperationBatches);
++}
++
++function enqueueBaseline(states: IssueLiveState[]) {
++  pendingBaselineStates = states;
++  applyPendingBaseline();
++}
++
++function flushPendingOperations() {
++  if (!pendingOperations.size) return;
++
++  const timelineEnd = document.querySelector<HTMLElement>('#timeline-comments-end');
++  const commentList = timelineEnd?.closest<HTMLElement>('.comment-list');
++  if (!timelineEnd || !commentList) return;
++  const currentByKey = new Map(currentTimelineEntries(commentList, timelineEnd).map((entry) => [entry.key, entry.element]));
++  const ready: IssueLiveOperation[] = [];
++
++  for (const [key, operation] of pendingOperations) {
++    const existing = currentByKey.get(key);
++    if (existing && isEditingTimelineEntry(existing)) continue;
++    pendingOperations.delete(key);
++    ready.push(operation);
++  }
++  enqueueTimelineOperations(ready);
++}
++
++function initPendingOperationObserver() {
++  const commentList = document.querySelector<HTMLElement>('.repository.view.issue .comment-list');
++  if (!commentList) return;
++
++  const observer = new MutationObserver(flushPendingOperations);
++  observer.observe(commentList, {attributes: true, subtree: true, attributeFilter: ['class']});
++}
++
++function initLiveCommentSubmit(socket: IssueLiveSocket) {
++  const form = document.querySelector<HTMLFormElement>('#comment-form');
++  if (!form) return;
++
++  form.addEventListener('submit', async (event: SubmitEvent) => {
++    if (event.defaultPrevented) return;
++    const submitter = event.submitter as HTMLButtonElement | null;
++    if (submitter?.id === 'status-button') return;
++
++    event.preventDefault();
++    // The form also has Gitea's delegated .form-fetch-action handler. Stop the
++    // event before it reaches document or the comment would be submitted twice.
++    event.stopPropagation();
++
++    const formData = new FormData(form);
++    if (submitter?.name) formData.append(submitter.name, submitter.value);
++
++    submitter?.setAttribute('disabled', '');
++    form.classList.add('is-loading');
++    try {
++      const headers = new Headers({'X-Gitea-Fetch-Action': '1'});
++      const response = await request(form.action, {
++        method: form.method || 'POST',
++        body: formData,
++        headers,
++      });
++      const responseJson = await response.json().catch(() => null);
++      if (!response.ok) {
++        throw new Error(responseJson?.errorMessage || `Unable to create comment: ${response.statusText}`);
++      }
++
++      const editor = getComboMarkdownEditor(form.querySelector('.combo-markdown-editor'));
++      editor?.value('');
++      editor?.textarea.dispatchEvent(new Event('input', {bubbles: true}));
++      editor?.dropzoneReloadFiles();
++      socket.refresh();
++    } catch (error) {
++      console.error(error);
++      showErrorToast(errorMessage(error));
++    } finally {
++      submitter?.removeAttribute('disabled');
++      form.classList.remove('is-loading');
++    }
++  });
++}
++
++export function initRepoIssueLive() {
++  if (!document.querySelector('.repository.view.issue .comment-list')) return;
++  if (!window.WebSocket) return;
++
++  let latestSequence = 0;
++  let connectionState: ConnectionState = 'closed';
++  const socket = new IssueLiveSocket(
++    issueLiveUrl(),
++    (message) => {
++      if (message.type === 'baseline') {
++        // The server sends the baseline after the initial operations. Defer
++        // committing it until those DOM operations have run in animation order.
++        enqueueBaseline(message.states ?? []);
++        return;
++      }
++      if (message.type !== 'timeline' || !message.operations) return;
++      if ((message.sequence ?? 0) <= latestSequence) return;
++      latestSequence = message.sequence ?? latestSequence + 1;
++      enqueueTimelineOperations(message.operations);
++    },
++    (state) => {
++      if (state === 'connecting' || (state === 'open' && connectionState !== 'open')) {
++        // Sequence numbers are scoped to one WebSocket connection.
++        latestSequence = 0;
++      }
++      connectionState = state;
++      updateConnectionIndicator(state);
++    },
++    () => ({
++      type: 'resume',
++      initialized: synchronizedBaseline,
++      states: synchronizedBaseline ? [...synchronizedStates.values()] : initialResumeStates(),
++    }),
++  );
++
++  socket.start();
++  initLiveCommentSubmit(socket);
++  initPendingOperationObserver();
++
++  document.addEventListener(issueLiveRefreshEvent, () => socket.refresh());
++
++  let visibilitySuspendTimer: number | null = null;
++  const cancelVisibilitySuspend = () => {
++    if (visibilitySuspendTimer === null) return;
++    window.clearTimeout(visibilitySuspendTimer);
++    visibilitySuspendTimer = null;
++  };
++  document.addEventListener('visibilitychange', () => {
++    if (document.visibilityState === 'hidden') {
++      cancelVisibilitySuspend();
++      // Browser chrome and mobile task switching can briefly hide the page.
++      // Keep the socket alive for a grace period to avoid reconnect churn.
++      visibilitySuspendTimer = window.setTimeout(() => {
++        visibilitySuspendTimer = null;
++        socket.suspend();
++      }, hiddenSocketSuspendDelay);
++    } else {
++      cancelVisibilitySuspend();
++      socket.resume();
++      flushPendingOperations();
++    }
++  });
++  window.addEventListener('pagehide', () => {
++    cancelVisibilitySuspend();
++    socket.suspend();
++  });
++  window.addEventListener('pageshow', () => socket.resume());
++}
+diff --git a/web_src/js/index.ts b/web_src/js/index.ts
+index 3289238b0d..308182de3f 100644
+--- a/web_src/js/index.ts
++++ b/web_src/js/index.ts
+@@ -21,6 +21,7 @@ import {initMarkupContent} from './markup/content.ts';
+ import {initRepoFileView} from './features/file-view.ts';
+ import {initUserExternalLogins, initUserCheckAppUrl} from './features/user-auth.ts';
+ import {initRepoPullRequestReview, initRepoIssueFilterItemLabel} from './features/repo-issue.ts';
++import {initRepoIssueLive} from './features/repo-issue-live.ts';
+ import {initRepoEllipsisButton, initCommitStatuses, initAvatarStackPopup, initCommitFileHistoryFollowRename} from './features/repo-commit.ts';
+ import {initRepoTopicBar} from './features/repo-home.ts';
+ import {initAdminCommon} from './features/admin/common.ts';
+@@ -129,6 +130,7 @@ const initPerformanceTracer = callInitFunctions([
+   initRepoIssueContentHistory,
+   initRepoIssueList,
+   initRepoIssueFilterItemLabel,
++  initRepoIssueLive,
+   initRepoMigration,
+   initRepoMigrationStatusChecker,
+   initRepoProjectsView,
+-- 
+2.54.0
+

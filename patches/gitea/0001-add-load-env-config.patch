@@ -1,4 +1,4 @@
-From ffd5dfe35895e19b3f0509954d6ecaa6fb8cc8e5 Mon Sep 17 00:00:00 2001
+From 8c8942f0f361f3beaf11f2c09f35383547e685ac Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:18 -0300
 Subject: [PATCH 1/4] add load env config
@@ -21,5 +21,5 @@ index 66b2fba461..cc68abf2a5 100644
  
  type AppVersion struct {
 -- 
-2.55.0
+2.54.0
 
