@@ -1,0 +1,156 @@
+From fc88a77bccc7bdbc64d7ea5f4c261af837fdfcaa Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Sat, 18 Jul 2026 09:45:03 +0000
+Subject: [PATCH] fix: prevent live context recursion and blocker races
+
+Clone the web context before attaching the shutdown-aware request context so the original Base does not become its own context ancestor. Build blocker maps off-path and atomically publish them under an RWMutex to avoid concurrent map iteration/write crashes without holding request handling during RDAP/WHOIS refreshes.
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ modules/setting/blockers.go    | 30 +++++++++++++++++++++++-------
+ routers/web/repo/issue_live.go | 14 ++++++++++++--
+ 2 files changed, 35 insertions(+), 9 deletions(-)
+
+diff --git a/modules/setting/blockers.go b/modules/setting/blockers.go
+index ff338ad..d0161dc 100644
+--- a/modules/setting/blockers.go
++++ b/modules/setting/blockers.go
+@@ -9,6 +9,7 @@ import (
+ 	"os"
+ 	"regexp"
+ 	"strings"
++	"sync"
+ 	"time"
+ 	"unicode"
+ 
+@@ -30,6 +31,7 @@ const (
+ )
+ 
+ var (
++	glbBlockMu   sync.RWMutex
+ 	glbRegex     = map[*regexp.Regexp]struct{}{}
+ 	glbPrefix    = map[netip.Prefix]struct{}{}
+ 	BlockConfigs = [2]*BlockerConfig{}
+@@ -37,6 +39,9 @@ var (
+ 
+ func ProcessBlockConfig() {
+ 	for {
++		nextRegex := make(map[*regexp.Regexp]struct{})
++		nextPrefix := make(map[netip.Prefix]struct{})
++
+ 		log.Info("Updating Block configs")
+ 		for _, BlockConfig := range BlockConfigs {
+ 			if BlockConfig == nil {
+@@ -48,7 +53,7 @@ func ProcessBlockConfig() {
+ 					if err != nil {
+ 						stdlog.Fatalf("error parse CIDR in %d %q, err: %s", index, raw, err)
+ 					}
+-					glbPrefix[prefix] = struct{}{}
++					nextPrefix[prefix] = struct{}{}
+ 					log.Debug("CIDR for block: %s", prefix.String())
+ 				}
+ 			}
+@@ -68,7 +73,7 @@ func ProcessBlockConfig() {
+ 							}
+ 
+ 							for _, prefix := range cidrs {
+-								glbPrefix[prefix] = struct{}{}
++								nextPrefix[prefix] = struct{}{}
+ 								log.Debug("CIDR for %q: %s", query, prefix.String())
+ 							}
+ 							continue
+@@ -81,7 +86,7 @@ func ProcessBlockConfig() {
+ 							}
+ 
+ 							for _, prefix := range cidrs {
+-								glbPrefix[prefix] = struct{}{}
++								nextPrefix[prefix] = struct{}{}
+ 								log.Debug("CIDR for %q: %s", query, prefix.String())
+ 							}
+ 							continue
+@@ -95,7 +100,7 @@ func ProcessBlockConfig() {
+ 							for p := range strings.FieldsFuncSeq(response.Body, isAddr) {
+ 								if p != "" {
+ 									if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
+-										glbPrefix[cidr] = struct{}{}
++										nextPrefix[cidr] = struct{}{}
+ 										log.Debug("CIDR for %q: %s", query, cidr.String())
+ 									}
+ 								}
+@@ -109,7 +114,7 @@ func ProcessBlockConfig() {
+ 									for p := range strings.FieldsFuncSeq(routev4, isAddr) {
+ 										if p != "" {
+ 											if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
+-												glbPrefix[cidr] = struct{}{}
++												nextPrefix[cidr] = struct{}{}
+ 												log.Debug("CIDR for %q: %s", query, cidr.String())
+ 											}
+ 										}
+@@ -119,7 +124,7 @@ func ProcessBlockConfig() {
+ 									for p := range strings.FieldsFuncSeq(routev6, isAddr) {
+ 										if p != "" {
+ 											if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
+-												glbPrefix[cidr] = struct{}{}
++												nextPrefix[cidr] = struct{}{}
+ 												log.Debug("CIDR for %q: %s", query, cidr.String())
+ 											}
+ 										}
+@@ -139,11 +144,19 @@ func ProcessBlockConfig() {
+ 					if err != nil {
+ 						stdlog.Fatalf("error on test header regex in %d: %q", index, h)
+ 					}
+-					glbRegex[rg] = struct{}{}
++					nextRegex[rg] = struct{}{}
+ 				}
+ 			}
+ 		}
+ 
++		// Publish a complete immutable snapshot. Readers only hold the lock
++		// while checking a request, and the slow RDAP/WHOIS refresh never blocks
++		// HTTP handlers.
++		glbBlockMu.Lock()
++		glbRegex = nextRegex
++		glbPrefix = nextPrefix
++		glbBlockMu.Unlock()
++
+ 		blockNextUpdate := time.Now().Add(time.Hour * 2)
+ 		log.Info("Next update %s, until %s", blockNextUpdate, time.Until(blockNextUpdate))
+ 		<-time.After(time.Until(blockNextUpdate))
+@@ -174,6 +187,9 @@ func IsBlock(r *http.Request) bool {
+ 		return true
+ 	}
+ 
++	glbBlockMu.RLock()
++	defer glbBlockMu.RUnlock()
++
+ 	if addr := r.Header.Get("X-Real-IP"); addr != "" {
+ 		if addrIP, err := netip.ParseAddrPort(addr); err == nil {
+ 			for prefix := range glbPrefix {
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index d054d96..cd518e1 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -526,8 +526,18 @@ func IssueLive(ctx *context.Context) {
+ 	defer cancel()
+ 	stopShutdownCancel := stdcontext.AfterFunc(graceful.GetManager().ShutdownContext(), cancel)
+ 	defer stopShutdownCancel()
+-	ctx.Base.RequestContext = reqctx.FromContext(connectionCtx)
+-	ctx.Req = ctx.Req.WithContext(connectionCtx)
++
++	// Never replace RequestContext on the original web context. The request
++	// context has the original Base in its parent chain; replacing it in place
++	// makes Value calls recurse through Base -> requestContext -> Base until the
++	// goroutine stack overflows. Use an isolated shallow copy for this long-lived
++	// WebSocket request instead.
++	liveBase := *ctx.Base
++	liveBase.RequestContext = reqctx.FromContext(connectionCtx)
++	liveBase.Req = ctx.Req.WithContext(connectionCtx)
++	liveCtx := *ctx
++	liveCtx.Base = &liveBase
++	ctx = &liveCtx
+ 
+ 	refresh := make(chan struct{}, 1)
+ 	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
+-- 
+2.47.3
+
