@@ -1,7 +1,7 @@
-From fc88a77bccc7bdbc64d7ea5f4c261af837fdfcaa Mon Sep 17 00:00:00 2001
+From d21db735ee70d1dac07060cfc67d3bf7a4e6f83c Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 18 Jul 2026 09:45:03 +0000
-Subject: [PATCH] fix: prevent live context recursion and blocker races
+Subject: [PATCH 6/6] fix: prevent live context recursion and blocker races
 
 Clone the web context before attaching the shutdown-aware request context so the original Base does not become its own context ancestor. Build blocker maps off-path and atomically publish them under an RWMutex to avoid concurrent map iteration/write crashes without holding request handling during RDAP/WHOIS refreshes.
 
@@ -12,7 +12,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  2 files changed, 35 insertions(+), 9 deletions(-)
 
 diff --git a/modules/setting/blockers.go b/modules/setting/blockers.go
-index ff338ad..d0161dc 100644
+index ff338adc97..d0161dcd9a 100644
 --- a/modules/setting/blockers.go
 +++ b/modules/setting/blockers.go
 @@ -9,6 +9,7 @@ import (
@@ -127,10 +127,10 @@ index ff338ad..d0161dc 100644
  		if addrIP, err := netip.ParseAddrPort(addr); err == nil {
  			for prefix := range glbPrefix {
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
-index d054d96..cd518e1 100644
+index fc188693c2..65c9538929 100644
 --- a/routers/web/repo/issue_live.go
 +++ b/routers/web/repo/issue_live.go
-@@ -526,8 +526,18 @@ func IssueLive(ctx *context.Context) {
+@@ -536,8 +536,18 @@ func IssueLive(ctx *context.Context) {
  	defer cancel()
  	stopShutdownCancel := stdcontext.AfterFunc(graceful.GetManager().ShutdownContext(), cancel)
  	defer stopShutdownCancel()
@@ -152,5 +152,5 @@ index d054d96..cd518e1 100644
  	refresh := make(chan struct{}, 1)
  	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
 -- 
-2.47.3
+2.55.0
 

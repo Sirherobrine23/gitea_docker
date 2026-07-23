@@ -1,4 +1,4 @@
-From 3c7281e7575b34e1c676986e7567c8d45d0601a7 Mon Sep 17 00:00:00 2001
+From 3b40d73ff52b1523857845c8de1ac1953b16f6c1 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -12,7 +12,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  4 files changed, 86 insertions(+), 25 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
-index 168fffef..e8f2b93c 100644
+index 1d63da05..75320de9 100644
 --- a/internal/app/cmd/cache-server.go
 +++ b/internal/app/cmd/cache-server.go
 @@ -17,9 +17,10 @@ import (
@@ -59,7 +59,7 @@ index 168fffef..e8f2b93c 100644
  
 -		secret := cfg.Cache.ExternalSecret
  		if secret == "" {
- 			return errors.New("cache.external_secret must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
+ 			return errors.New("cache.external_secret (or cache.external_secret_file) must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
 index 18aaa373..312ede1c 100644
@@ -101,7 +101,7 @@ index 18aaa373..312ede1c 100644
  	rootCmd.AddCommand(cacheCmd)
  
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index a4b5a0a6..76a1f3d4 100644
+index 2ed6f70e..4cf08c35 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
 @@ -38,6 +38,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
@@ -136,7 +136,7 @@ index a4b5a0a6..76a1f3d4 100644
  		initLogging(cfg)
  		log.Infoln("Starting runner daemon")
  
-@@ -200,8 +225,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -202,8 +227,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
  
  type daemonArgs struct {

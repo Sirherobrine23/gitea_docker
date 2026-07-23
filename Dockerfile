@@ -52,7 +52,7 @@ RUN git fetch --unshallow --tags && \
     echo "$LATEST_TAG+$COMMITS_AHEAD-g$COMMIT_HASH" | sed 's/^v//' > VERSION; \
   fi
 RUN --mount=type=bind,source=./patches/act/,target=/tmp/build-context \
-    find /tmp/build-context -type f | xargs -i{} git apply --ignore-whitespace "{}"
+    (ls /tmp/build-context) | sort -V | xargs -i{} git apply --ignore-whitespace "/tmp/build-context/{}"
 RUN go mod download
 # Build latest gitea runner file
 FROM --platform=$BUILDPLATFORM gitea_runner_base AS runner
@@ -95,7 +95,7 @@ EOF
 # Copy code
 COPY --from=gitea_code / ./
 RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context \
-  find /tmp/build-context -type f | grep -v add_env.patch | xargs -i{} git apply --ignore-whitespace "{}"
+  (ls /tmp/build-context) | sort -V | xargs -i{} git apply --ignore-whitespace "/tmp/build-context/{}"
 RUN go mod tidy
 RUN make frontend
 

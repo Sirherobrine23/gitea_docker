@@ -1,7 +1,7 @@
-From 294e2d3a68c84edbd246a9393c732ebf07bc7cc6 Mon Sep 17 00:00:00 2001
+From 6523a1c81335aa0b889a99b8cb75befe01a10553 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
-Subject: [PATCH 4/4] feat: add efficient live issue updates
+Subject: [PATCH 4/6] feat: add efficient live issue updates
 
 Avoid re-rendering the complete timeline every two seconds and do not morph
 all comments when a page first opens. Use mutation invalidations for common
@@ -93,10 +93,10 @@ index 10c9d7d726..e413abccbb 100644
  		ctx.JSON(http.StatusOK, map[string]any{
  			"empty": true,
 diff --git a/routers/web/repo/issue_comment.go b/routers/web/repo/issue_comment.go
-index 4681c2fecd..b82912a98e 100644
+index 569b0cf707..9271f4c062 100644
 --- a/routers/web/repo/issue_comment.go
 +++ b/routers/web/repo/issue_comment.go
-@@ -184,6 +184,7 @@ func NewComment(ctx *context.Context) {
+@@ -183,6 +183,7 @@ func NewComment(ctx *context.Context) {
  		}
  	} // end if: handle close or reopen
  
@@ -104,7 +104,7 @@ index 4681c2fecd..b82912a98e 100644
  	ctx.JSONRedirect(redirect)
  }
  
-@@ -264,6 +265,7 @@ func UpdateCommentContent(ctx *context.Context) {
+@@ -263,6 +264,7 @@ func UpdateCommentContent(ctx *context.Context) {
  		}
  	}
  
@@ -112,7 +112,7 @@ index 4681c2fecd..b82912a98e 100644
  	ctx.JSON(http.StatusOK, map[string]any{
  		"content":        commentContentHTML(ctx, renderedContent),
  		"contentVersion": comment.ContentVersion,
-@@ -302,6 +304,7 @@ func DeleteComment(ctx *context.Context) {
+@@ -301,6 +303,7 @@ func DeleteComment(ctx *context.Context) {
  		return
  	}
  
@@ -120,7 +120,7 @@ index 4681c2fecd..b82912a98e 100644
  	ctx.Status(http.StatusOK)
  }
  
-@@ -390,6 +393,7 @@ func ChangeCommentReaction(ctx *context.Context) {
+@@ -389,6 +392,7 @@ func ChangeCommentReaction(ctx *context.Context) {
  		return
  	}
  
@@ -129,10 +129,10 @@ index 4681c2fecd..b82912a98e 100644
  		ctx.JSON(http.StatusOK, map[string]any{
  			"empty": true,
 diff --git a/routers/web/repo/issue_label.go b/routers/web/repo/issue_label.go
-index f926234814..67b83e588d 100644
+index b0c0bb0b79..c79a98f6d1 100644
 --- a/routers/web/repo/issue_label.go
 +++ b/routers/web/repo/issue_label.go
-@@ -229,5 +229,6 @@ func UpdateIssueLabel(ctx *context.Context) {
+@@ -227,5 +227,6 @@ func UpdateIssueLabel(ctx *context.Context) {
  		return
  	}
  
@@ -1924,5 +1924,5 @@ index 3289238b0d..308182de3f 100644
    initRepoMigrationStatusChecker,
    initRepoProjectsView,
 -- 
-2.54.0
+2.55.0
 

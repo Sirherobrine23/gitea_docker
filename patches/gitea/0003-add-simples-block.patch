@@ -1,7 +1,7 @@
-From d167386f020687d2dc2b110f6c29287072b57a2f Mon Sep 17 00:00:00 2001
+From 916bb1ae24f3765c9661c3145a2360d91c150de3 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 6 Jul 2026 19:46:20 -0300
-Subject: [PATCH 3/4] add simples block
+Subject: [PATCH 3/6] add simples block
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
@@ -247,10 +247,10 @@ index 0000000000..ff338adc97
 +	return false
 +}
 diff --git a/modules/setting/setting.go b/modules/setting/setting.go
-index 1b19923d9b..f1206ece79 100644
+index 483b99622c..cf844430fe 100644
 --- a/modules/setting/setting.go
 +++ b/modules/setting/setting.go
-@@ -158,6 +158,7 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
+@@ -157,6 +157,7 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
  	loadMirrorFrom(cfg)
  	loadMarkupFrom(cfg)
  	loadGlobalLockFrom(cfg)
@@ -259,5 +259,5 @@ index 1b19923d9b..f1206ece79 100644
  	return nil
  }
 -- 
-2.54.0
+2.55.0
 
