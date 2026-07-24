@@ -1,4 +1,4 @@
-From 916bb1ae24f3765c9661c3145a2360d91c150de3 Mon Sep 17 00:00:00 2001
+From 32ff79d76c31e06e5983a4d5e3db2565c4eb1aa5 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 6 Jul 2026 19:46:20 -0300
 Subject: [PATCH 3/6] add simples block
@@ -247,12 +247,12 @@ index 0000000000..ff338adc97
 +	return false
 +}
 diff --git a/modules/setting/setting.go b/modules/setting/setting.go
-index 483b99622c..cf844430fe 100644
+index 790b8fbb7c..86db2413ff 100644
 --- a/modules/setting/setting.go
 +++ b/modules/setting/setting.go
-@@ -157,6 +157,7 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
- 	loadMirrorFrom(cfg)
+@@ -158,6 +158,7 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
  	loadMarkupFrom(cfg)
+ 	loadRedisFrom(cfg)
  	loadGlobalLockFrom(cfg)
 +	loadBlockConfig(cfg)
  	loadOtherFrom(cfg)

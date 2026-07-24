@@ -1,4 +1,4 @@
-From b48f2737289f1eecfc3d45d87bbd2fc99751e01c Mon Sep 17 00:00:00 2001
+From 0e4447539d5a623bf92afd7d75e1226f600eb632 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:18 -0300
 Subject: [PATCH 1/6] add load env config

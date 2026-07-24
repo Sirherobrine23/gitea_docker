@@ -1,4 +1,4 @@
-From 6523a1c81335aa0b889a99b8cb75befe01a10553 Mon Sep 17 00:00:00 2001
+From dd4fc5e1393fca540540d843ef83049ab6d53bf5 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 4/6] feat: add efficient live issue updates

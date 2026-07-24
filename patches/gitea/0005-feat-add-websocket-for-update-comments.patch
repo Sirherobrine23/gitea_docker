@@ -1,4 +1,4 @@
-From 574bac0f69d1910ee5f9ef40381e1b7dab6b8655 Mon Sep 17 00:00:00 2001
+From 6840ffc65e9ba050406ce3e0c74fa800d030197b Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 5/6] feat: add websocket for update comments
