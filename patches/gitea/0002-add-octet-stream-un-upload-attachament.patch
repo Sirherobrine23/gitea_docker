@@ -1,18 +1,18 @@
-From 7f585f73a6a12b107ce46b80cb50f3c0490b4f80 Mon Sep 17 00:00:00 2001
+From be30195f6bec4f41260a953cee29d12e41bf20b5 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:58 -0300
-Subject: [PATCH 2/6] add octet stream un upload attachament
+Subject: [PATCH 2/7] add octet stream un upload attachament
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- routers/api/v1/repo/release_attachment.go | 11 ++++++++---
- 1 file changed, 8 insertions(+), 3 deletions(-)
+ routers/api/v1/repo/release_attachment.go | 9 +++++++--
+ 1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/routers/api/v1/repo/release_attachment.go b/routers/api/v1/repo/release_attachment.go
-index 915ac725b0..9c341e0394 100644
+index 915ac725b0..8325e8fc3f 100644
 --- a/routers/api/v1/repo/release_attachment.go
 +++ b/routers/api/v1/repo/release_attachment.go
-@@ -218,20 +218,25 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
+@@ -218,7 +218,9 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
  	// Get uploaded file from request
  	var filename string
  	var uploaderFile *attachment_service.UploaderFile
@@ -23,13 +23,7 @@ index 915ac725b0..9c341e0394 100644
  		file, header, err := ctx.Req.FormFile("attachment")
  		if err != nil {
  			ctx.APIErrorInternal(err)
- 			return
- 		}
- 		defer file.Close()
--
-+	
- 		filename = header.Filename
- 		if name := ctx.FormString("name"); name != "" {
+@@ -231,7 +233,10 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
  			filename = name
  		}
  		uploaderFile = attachment_service.NewLimitedUploaderKnownSize(file, header.Size)
@@ -42,5 +36,5 @@ index 915ac725b0..9c341e0394 100644
  		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
  	}
 -- 
-2.55.0
+2.47.3
 

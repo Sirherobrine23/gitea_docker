@@ -1,7 +1,7 @@
-From 7b6249c4f89b88700686f06221db26a77aa561b7 Mon Sep 17 00:00:00 2001
+From 1f1b7a89692945d815530ccbd285f6b6938013c2 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 18 Jul 2026 09:45:03 +0000
-Subject: [PATCH 6/6] fix: prevent live context recursion and blocker races
+Subject: [PATCH 6/7] fix: prevent live context recursion and blocker races
 
 Clone the web context before attaching the shutdown-aware request context so the original Base does not become its own context ancestor. Build blocker maps off-path and atomically publish them under an RWMutex to avoid concurrent map iteration/write crashes without holding request handling during RDAP/WHOIS refreshes.
 
@@ -152,5 +152,5 @@ index fc188693c2..65c9538929 100644
  	refresh := make(chan struct{}, 1)
  	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
 -- 
-2.55.0
+2.47.3
 

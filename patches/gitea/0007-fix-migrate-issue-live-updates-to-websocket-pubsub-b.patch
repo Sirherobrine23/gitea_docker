@@ -1,0 +1,333 @@
+From f125ee6332bebe888b6334d1bbb8d65c1a266d65 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Mon, 27 Jul 2026 14:49:24 +0000
+Subject: [PATCH 7/7] fix: migrate issue live updates to websocket pubsub base
+
+Use the pub/sub broker introduced by the WebSocket notification subsystem for issue timeline invalidations, keep the permission-aware issue WebSocket endpoint explicit, and render the issue description before generating snapshots so the first timeline entry is not replaced by empty content.
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/web/repo/issue_content_history.go     |  5 --
+ routers/web/repo/issue_live.go                | 38 +++++++++-----
+ routers/web/repo/issue_live_hub.go            | 50 +++---------------
+ routers/web/repo/issue_live_test.go           | 51 +++++++++++++++++++
+ routers/web/repo/issue_view.go                | 23 ++++++---
+ web_src/js/features/repo-issue-live.ts        |  2 +-
+ ...edworker.ts => issue-live.sharedworker.ts} |  0
+ web_src/js/modules/issue-live-worker.ts       |  2 +-
+ 8 files changed, 101 insertions(+), 70 deletions(-)
+ rename web_src/js/{websocket.sharedworker.ts => issue-live.sharedworker.ts} (100%)
+
+diff --git a/routers/web/repo/issue_content_history.go b/routers/web/repo/issue_content_history.go
+index e32e7d90f3..08c27fdee3 100644
+--- a/routers/web/repo/issue_content_history.go
++++ b/routers/web/repo/issue_content_history.go
+@@ -22,11 +22,6 @@ import (
+ 
+ // GetContentHistoryOverview get overview
+ func GetContentHistoryOverview(ctx *context.Context) {
+-	if isIssueLiveWebSocketRequest(ctx.Req) {
+-		IssueLive(ctx)
+-		return
+-	}
+-
+ 	issue := GetActionIssue(ctx)
+ 	if ctx.Written() {
+ 		return
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index 65c9538929..b702a483d9 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -10,7 +10,6 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+-	"net/http"
+ 	"sort"
+ 	"strconv"
+ 	"strings"
+@@ -95,11 +94,6 @@ type issueLiveSnapshotState struct {
+ 	Hash      [sha256.Size]byte
+ }
+ 
+-func isIssueLiveWebSocketRequest(req *http.Request) bool {
+-	return strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
+-		strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
+-}
+-
+ func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
+ 	issue, err := issues_model.GetIssueByIndex(ctx, ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
+ 	if err != nil {
+@@ -138,6 +132,12 @@ func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
+ 	if err := filterXRefComments(ctx, issue); err != nil {
+ 		return "", err
+ 	}
++	// The issue/PR description is the first timeline entry. It must be prepared
++	// exactly like the regular issue view before rendering the live snapshot;
++	// otherwise the first refresh replaces it with an empty body.
++	if err := prepareIssueViewContentData(ctx, issue); err != nil {
++		return "", err
++	}
+ 
+ 	ctx.Data["Issue"] = issue
+ 	ctx.Data["IsAttachmentEnabled"] = setting.Attachment.Enabled
+@@ -549,9 +549,9 @@ func IssueLive(ctx *context.Context) {
+ 	liveCtx.Base = &liveBase
+ 	ctx = &liveCtx
+ 
+-	refresh := make(chan struct{}, 1)
+-	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
++	brokerRefresh, unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
+ 	defer unregisterRefresh()
++	clientRefresh := make(chan struct{}, 1)
+ 
+ 	initialHTML, err := prepareIssueLiveSnapshot(ctx)
+ 	if err != nil {
+@@ -629,7 +629,7 @@ func IssueLive(ctx *context.Context) {
+ 		}
+ 	}
+ 
+-	go issueLiveReadLoop(connectionCtx, cancel, conn, refresh)
++	go issueLiveReadLoop(connectionCtx, cancel, conn, clientRefresh)
+ 
+ 	refreshTicker := time.NewTicker(issueLiveSafetyRefreshInterval)
+ 	defer refreshTicker.Stop()
+@@ -660,11 +660,25 @@ func IssueLive(ctx *context.Context) {
+ 		case <-connectionCtx.Done():
+ 			return
+ 		case <-refreshTicker.C:
+-		case <-refresh:
+-			// Collapse a burst of local changes into one template render.
++		case _, ok := <-brokerRefresh:
++			if !ok {
++				return
++			}
++			// Collapse a burst of pub/sub invalidations and explicit client
++			// refreshes into one template render.
++			for {
++				select {
++				case <-brokerRefresh:
++				case <-clientRefresh:
++				default:
++					goto refreshTimeline
++				}
++			}
++		case <-clientRefresh:
+ 			for {
+ 				select {
+-				case <-refresh:
++				case <-brokerRefresh:
++				case <-clientRefresh:
+ 				default:
+ 					goto refreshTimeline
+ 				}
+diff --git a/routers/web/repo/issue_live_hub.go b/routers/web/repo/issue_live_hub.go
+index ea1b46756e..268efc503c 100644
+--- a/routers/web/repo/issue_live_hub.go
++++ b/routers/web/repo/issue_live_hub.go
+@@ -4,58 +4,22 @@
+ package repo
+ 
+ import (
+-	"sync"
++	"fmt"
+ 
+ 	issues_model "gitea.dev/models/issues"
++	"gitea.dev/services/pubsub"
+ )
+ 
+-type issueLiveTopic struct {
+-	repoID int64
+-	index  int64
++func issueLiveTopic(repoID, index int64) string {
++	return fmt.Sprintf("issue-live-%d-%d", repoID, index)
+ }
+ 
+-var issueLiveRefreshHub = struct {
+-	sync.RWMutex
+-	subscribers map[issueLiveTopic]map[chan struct{}]struct{}
+-}{
+-	subscribers: make(map[issueLiveTopic]map[chan struct{}]struct{}),
+-}
+-
+-func registerIssueLiveRefresh(repoID, index int64, refresh chan struct{}) func() {
+-	topic := issueLiveTopic{repoID: repoID, index: index}
+-
+-	issueLiveRefreshHub.Lock()
+-	subscribers := issueLiveRefreshHub.subscribers[topic]
+-	if subscribers == nil {
+-		subscribers = make(map[chan struct{}]struct{})
+-		issueLiveRefreshHub.subscribers[topic] = subscribers
+-	}
+-	subscribers[refresh] = struct{}{}
+-	issueLiveRefreshHub.Unlock()
+-
+-	return func() {
+-		issueLiveRefreshHub.Lock()
+-		if subscribers := issueLiveRefreshHub.subscribers[topic]; subscribers != nil {
+-			delete(subscribers, refresh)
+-			if len(subscribers) == 0 {
+-				delete(issueLiveRefreshHub.subscribers, topic)
+-			}
+-		}
+-		issueLiveRefreshHub.Unlock()
+-	}
++func registerIssueLiveRefresh(repoID, index int64) (<-chan []byte, func()) {
++	return pubsub.DefaultBroker.Subscribe(issueLiveTopic(repoID, index))
+ }
+ 
+ func notifyIssueLive(repoID, index int64) {
+-	topic := issueLiveTopic{repoID: repoID, index: index}
+-
+-	issueLiveRefreshHub.RLock()
+-	defer issueLiveRefreshHub.RUnlock()
+-	for refresh := range issueLiveRefreshHub.subscribers[topic] {
+-		select {
+-		case refresh <- struct{}{}:
+-		default:
+-		}
+-	}
++	pubsub.DefaultBroker.Publish(issueLiveTopic(repoID, index), []byte{1})
+ }
+ 
+ func notifyIssueLiveIssue(issue *issues_model.Issue) {
+diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
+index 602c243104..2479421f99 100644
+--- a/routers/web/repo/issue_live_test.go
++++ b/routers/web/repo/issue_live_test.go
+@@ -5,6 +5,9 @@ package repo
+ 
+ import (
+ 	"testing"
++	"time"
++
++	"gitea.dev/services/pubsub"
+ 
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+@@ -101,6 +104,54 @@ func TestIssueLiveDiffSnapshotDetectsReorder(t *testing.T) {
+ 	assert.Empty(t, operations[1].BeforeKey)
+ }
+ 
++func TestIssueLiveDiffSnapshotKeepsIssueDescription(t *testing.T) {
++	initial, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item comment issue-content-comment" id="issue-4">
++		<div class="comment-body">old description</div>
++	</div>
++</div>`)
++	require.NoError(t, err)
++
++	updated, err := issueLiveParseSnapshot(`
++<div data-issue-live-snapshot>
++	<div class="timeline-item comment issue-content-comment" id="issue-4">
++		<div class="comment-body">new description</div>
++	</div>
++</div>`)
++	require.NoError(t, err)
++
++	operations, current := issueLiveDiffSnapshot(issueLiveSnapshotStates(initial), updated)
++	require.Len(t, operations, 1)
++	assert.Equal(t, "upsert", operations[0].Action)
++	assert.Equal(t, "issue-4", operations[0].Key)
++	assert.Contains(t, operations[0].HTML, "new description")
++	assert.Contains(t, current, "issue-4")
++}
++
++func TestIssueLiveRefreshUsesPubsubBroker(t *testing.T) {
++	previousBroker := pubsub.DefaultBroker
++	pubsub.DefaultBroker = pubsub.NewMemoryBroker()
++	t.Cleanup(func() { pubsub.DefaultBroker = previousBroker })
++
++	refresh, cancel := registerIssueLiveRefresh(10, 20)
++	t.Cleanup(cancel)
++
++	notifyIssueLive(10, 20)
++	select {
++	case <-refresh:
++	case <-time.After(time.Second):
++		t.Fatal("timed out waiting for issue live pub/sub invalidation")
++	}
++
++	notifyIssueLive(10, 21)
++	select {
++	case <-refresh:
++		t.Fatal("received invalidation for a different issue topic")
++	case <-time.After(20 * time.Millisecond):
++	}
++}
++
+ func TestIssueLiveClientStateRoundTrip(t *testing.T) {
+ 	entries, err := issueLiveParseSnapshot(`
+ <div data-issue-live-snapshot>
+diff --git a/routers/web/repo/issue_view.go b/routers/web/repo/issue_view.go
+index db9830d450..27f04f16e6 100644
+--- a/routers/web/repo/issue_view.go
++++ b/routers/web/repo/issue_view.go
+@@ -1086,18 +1086,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
+ 	}
+ }
+ 
+-func prepareIssueViewContent(ctx *context.Context, issue *issues_model.Issue) {
+-	var err error
++func prepareIssueViewContentData(ctx *context.Context, issue *issues_model.Issue) error {
+ 	rctx := renderhelper.NewRenderContextRepoComment(ctx, ctx.Repo.Repository, renderhelper.RepoCommentOptions{
+ 		FootnoteContextID: "0", // Set footnote context ID to 0 for the issue content
+ 	})
+-	issue.RenderedContent, err = markdown.RenderString(rctx, issue.Content)
++	renderedContent, err := markdown.RenderString(rctx, issue.Content)
+ 	if err != nil {
+-		ctx.ServerError("RenderString", err)
+-		return
++		return fmt.Errorf("render issue content: %w", err)
+ 	}
+-	if issue.ShowRole, err = roleDescriptor(ctx, issue.Repo, issue.Poster, nil, issue, issue.HasOriginalAuthor()); err != nil {
+-		ctx.ServerError("roleDescriptor", err)
+-		return
++	showRole, err := roleDescriptor(ctx, issue.Repo, issue.Poster, nil, issue, issue.HasOriginalAuthor())
++	if err != nil {
++		return fmt.Errorf("resolve issue poster role: %w", err)
++	}
++	issue.RenderedContent = renderedContent
++	issue.ShowRole = showRole
++	return nil
++}
++
++func prepareIssueViewContent(ctx *context.Context, issue *issues_model.Issue) {
++	if err := prepareIssueViewContentData(ctx, issue); err != nil {
++		ctx.ServerError("prepareIssueViewContent", err)
+ 	}
+ }
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index fa8e5a3a16..3ae436a8a1 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -35,7 +35,7 @@ type MorphOptionsWithCallbacks = {
+ 
+ function issueLiveUrl() {
+   const path = window.location.pathname.replace(/\/+$/, '');
+-  const url = new URL(`${path}/content-history/overview`, window.location.origin);
++  const url = new URL(`${path}/live`, window.location.origin);
+   url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+   return url.href;
+ }
+diff --git a/web_src/js/websocket.sharedworker.ts b/web_src/js/issue-live.sharedworker.ts
+similarity index 100%
+rename from web_src/js/websocket.sharedworker.ts
+rename to web_src/js/issue-live.sharedworker.ts
+diff --git a/web_src/js/modules/issue-live-worker.ts b/web_src/js/modules/issue-live-worker.ts
+index d9dca36975..2d9892142f 100644
+--- a/web_src/js/modules/issue-live-worker.ts
++++ b/web_src/js/modules/issue-live-worker.ts
+@@ -35,7 +35,7 @@ export class IssueLiveSharedWorker {
+ 
+   constructor(url: string, resume: IssueLiveClientMessage) {
+     this.sharedWorker = new SharedWorker(
+-      new URL('../websocket.sharedworker.ts', import.meta.url),
++      new URL('../issue-live.sharedworker.ts', import.meta.url),
+       {name: 'issue-live-websocket', type: 'module'},
+     );
+ 
+-- 
+2.47.3
+

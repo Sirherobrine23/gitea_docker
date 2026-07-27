@@ -1,7 +1,7 @@
-From dd4fc5e1393fca540540d843ef83049ab6d53bf5 Mon Sep 17 00:00:00 2001
+From 6d5e35aa44cd29c6a24b7285e4cc62909abb1ad9 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
-Subject: [PATCH 4/6] feat: add efficient live issue updates
+Subject: [PATCH 4/7] feat: add efficient live issue updates
 
 Avoid re-rendering the complete timeline every two seconds and do not morph
 all comments when a page first opens. Use mutation invalidations for common
@@ -1078,10 +1078,10 @@ index 0000000000..445cec3a70
 +	assert.Equal(t, "issuecomment-10", states[0].Key)
 +}
 diff --git a/routers/web/web.go b/routers/web/web.go
-index 0bfae44e86..e0bee980d8 100644
+index 99ffc06756..0ad7227365 100644
 --- a/routers/web/web.go
 +++ b/routers/web/web.go
-@@ -1296,6 +1296,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+@@ -1298,6 +1298,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
  		m.Get("/posters", repo.IssuePullPosters)
  		m.Group("/{index}", func() {
  			m.Get("/info", repo.GetIssueInfo)
@@ -1924,5 +1924,5 @@ index 3289238b0d..308182de3f 100644
    initRepoMigrationStatusChecker,
    initRepoProjectsView,
 -- 
-2.55.0
+2.47.3
 
