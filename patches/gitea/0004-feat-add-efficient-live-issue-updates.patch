@@ -1,4 +1,4 @@
-From 6d5e35aa44cd29c6a24b7285e4cc62909abb1ad9 Mon Sep 17 00:00:00 2001
+From 4265374e76fe7b26a0587fc0b704b1834041bc7f Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 4/7] feat: add efficient live issue updates
@@ -1924,5 +1924,5 @@ index 3289238b0d..308182de3f 100644
    initRepoMigrationStatusChecker,
    initRepoProjectsView,
 -- 
-2.47.3
+2.55.0
 

@@ -1,4 +1,4 @@
-From 1f1b7a89692945d815530ccbd285f6b6938013c2 Mon Sep 17 00:00:00 2001
+From e946f4c3c4e649554c32290395bad8db00307b36 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 18 Jul 2026 09:45:03 +0000
 Subject: [PATCH 6/7] fix: prevent live context recursion and blocker races
@@ -152,5 +152,5 @@ index fc188693c2..65c9538929 100644
  	refresh := make(chan struct{}, 1)
  	unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"), refresh)
 -- 
-2.47.3
+2.55.0
 

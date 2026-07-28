@@ -1,21 +1,23 @@
-From f125ee6332bebe888b6334d1bbb8d65c1a266d65 Mon Sep 17 00:00:00 2001
+From 0de81322e3c625bde0c96f6039781bf4864c4d4e Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
 Subject: [PATCH 7/7] fix: migrate issue live updates to websocket pubsub base
 
 Use the pub/sub broker introduced by the WebSocket notification subsystem for issue timeline invalidations, keep the permission-aware issue WebSocket endpoint explicit, and render the issue description before generating snapshots so the first timeline entry is not replaced by empty content.
 
+Preserve hashes from initial timeline operations when the baseline arrives, avoid relying on Iterator Helpers in the browser, and stop cleanly if the pub/sub subscription closes while invalidations are being coalesced.
+
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
  routers/web/repo/issue_content_history.go     |  5 --
- routers/web/repo/issue_live.go                | 38 +++++++++-----
+ routers/web/repo/issue_live.go                | 44 ++++++++++++++++++-------
  routers/web/repo/issue_live_hub.go            | 50 +++---------------
  routers/web/repo/issue_live_test.go           | 51 +++++++++++++++++++
  routers/web/repo/issue_view.go                | 23 ++++++---
- web_src/js/features/repo-issue-live.ts        |  2 +-
+ web_src/js/features/repo-issue-live.ts        |  5 +--
  ...edworker.ts => issue-live.sharedworker.ts} |  0
  web_src/js/modules/issue-live-worker.ts       |  2 +-
- 8 files changed, 101 insertions(+), 70 deletions(-)
+ 8 files changed, 108 insertions(+), 72 deletions(-)
  rename web_src/js/{websocket.sharedworker.ts => issue-live.sharedworker.ts} (100%)
 
 diff --git a/routers/web/repo/issue_content_history.go b/routers/web/repo/issue_content_history.go
@@ -35,7 +37,7 @@ index e32e7d90f3..08c27fdee3 100644
  	if ctx.Written() {
  		return
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
-index 65c9538929..b702a483d9 100644
+index 65c9538929498518c3e510c93ea38ac7fdf0eb92..393e5992ae235179ddab300a1e3de82ba7c239fc 100644
 --- a/routers/web/repo/issue_live.go
 +++ b/routers/web/repo/issue_live.go
 @@ -10,7 +10,6 @@ import (
@@ -92,7 +94,7 @@ index 65c9538929..b702a483d9 100644
  
  	refreshTicker := time.NewTicker(issueLiveSafetyRefreshInterval)
  	defer refreshTicker.Stop()
-@@ -660,11 +660,25 @@ func IssueLive(ctx *context.Context) {
+@@ -660,11 +660,31 @@ func IssueLive(ctx *context.Context) {
  		case <-connectionCtx.Done():
  			return
  		case <-refreshTicker.C:
@@ -106,7 +108,10 @@ index 65c9538929..b702a483d9 100644
 +			// refreshes into one template render.
 +			for {
 +				select {
-+				case <-brokerRefresh:
++				case _, ok := <-brokerRefresh:
++					if !ok {
++						return
++					}
 +				case <-clientRefresh:
 +				default:
 +					goto refreshTimeline
@@ -116,7 +121,10 @@ index 65c9538929..b702a483d9 100644
  			for {
  				select {
 -				case <-refresh:
-+				case <-brokerRefresh:
++				case _, ok := <-brokerRefresh:
++					if !ok {
++						return
++					}
 +				case <-clientRefresh:
  				default:
  					goto refreshTimeline
@@ -299,7 +307,7 @@ index db9830d450..27f04f16e6 100644
  	}
  }
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
-index fa8e5a3a16..3ae436a8a1 100644
+index fa8e5a3a164ec5016efe171aa662cd562f546166..ef1cdeacffcf87dd4e720a675119dfe43c588abd 100644
 --- a/web_src/js/features/repo-issue-live.ts
 +++ b/web_src/js/features/repo-issue-live.ts
 @@ -35,7 +35,7 @@ type MorphOptionsWithCallbacks = {
@@ -311,6 +319,23 @@ index fa8e5a3a16..3ae436a8a1 100644
    url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
    return url.href;
  }
+@@ -155,7 +155,7 @@ function currentResumeMessage(): IssueLiveClientMessage {
+   return {
+     type: 'resume',
+     initialized: synchronizedBaseline,
+-    states: synchronizedBaseline ? synchronizedStates.values().toArray() : initialResumeStates(),
++    states: synchronizedBaseline ? [...synchronizedStates.values()] : initialResumeStates(),
+   };
+ }
+ 
+@@ -330,7 +330,6 @@ function applyTimelineOperations(operations: IssueLiveOperation[]) {
+ function applyPendingBaseline() {
+   if (!pendingBaselineStates || operationFrame !== null || operationBatches.length) return;
+ 
+-  synchronizedStates.clear();
+   for (const state of pendingBaselineStates) synchronizedStates.set(state.key, state);
+   pendingBaselineStates = null;
+   synchronizedBaseline = true;
 diff --git a/web_src/js/websocket.sharedworker.ts b/web_src/js/issue-live.sharedworker.ts
 similarity index 100%
 rename from web_src/js/websocket.sharedworker.ts
@@ -329,5 +354,5 @@ index d9dca36975..2d9892142f 100644
      );
  
 -- 
-2.47.3
+2.55.0
 

@@ -51,6 +51,7 @@ jobs:
     name: Gitea build
     if: ${{ needs.checker.outputs.BUILDS_COUNT > 0 }}
     strategy:
+      fail-fast: false
       matrix:
         include: ${{ fromJSON(needs.checker.outputs.BUILDS) }}
     steps:
