@@ -5,10 +5,11 @@
 
 # Flags global
 ARG ACT_TAG=latest
+ARG GITEA_TAG="main"
 
 # Pull codes
 FROM --platform=$BUILDPLATFORM scratch AS gitea_code
-ARG GITEA_TAG="main"
+ARG GITEA_TAG
 ADD --keep-git-dir=true https://github.com/go-gitea/gitea.git#${GITEA_TAG} /
 
 FROM --platform=$BUILDPLATFORM scratch AS runner_code
@@ -40,7 +41,7 @@ EOF
 FROM base_sys AS gitea_runner_base
 WORKDIR /build
 COPY --from=runner_code /go.mod /go.sum ./
-RUN go mod download
+RUN go mod tidy && go mod download
 COPY --from=runner_code / ./
 RUN git fetch --unshallow --tags && \
   LATEST_TAG=$(git tag --list --sort=-v:refname | head -n 1) && \
@@ -53,7 +54,7 @@ RUN git fetch --unshallow --tags && \
   fi
 RUN --mount=type=bind,source=./patches/act/,target=/tmp/build-context \
     (ls /tmp/build-context) | sort -V | xargs -i{} git apply --ignore-whitespace "/tmp/build-context/{}"
-RUN go mod download
+RUN go mod tidy && go mod download
 # Build latest gitea runner file
 FROM --platform=$BUILDPLATFORM gitea_runner_base AS runner
 ARG TARGETOS
@@ -71,6 +72,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
 
 ### Gitea
 FROM base_sys AS gitea_builder_base
+ARG GITEA_TAG
 # Copy go mod and node package and download
 WORKDIR /build
 COPY --from=gitea_code /go.mod /go.sum ./
@@ -94,8 +96,31 @@ pnpm install --frozen-lockfile
 EOF
 # Copy code
 COPY --from=gitea_code / ./
-RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context \
-  (ls /tmp/build-context) | sort -V | xargs -i{} git apply --ignore-whitespace "/tmp/build-context/{}"
+RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context <<'EOF'
+set -eu
+
+patch_root=/tmp/build-context
+patch_dir="$patch_root"
+patch_source=patches/gitea/
+normalized_tag=${GITEA_TAG#v}
+release_series=$(printf '%s\n' "$normalized_tag" | sed -nE 's/^([0-9]+)\.([0-9]+)(\..*)?$/\1.\2/p')
+
+# A release-specific series directory takes precedence over the root patches.
+# Examples: 1.27.2 and v1.27.2 both select patches/gitea/1.27/ when it exists.
+if [ -n "$release_series" ] && [ -d "$patch_root/$release_series" ]; then
+  patch_dir="$patch_root/$release_series"
+  patch_source="patches/gitea/$release_series/"
+fi
+
+echo "Gitea ref: $GITEA_TAG"
+echo "Using Gitea patches from: $patch_source"
+
+find "$patch_dir" -maxdepth 1 -type f -name '*.patch' -printf '%f\n' | sort -V | while IFS= read -r patch; do
+  echo "Applying Gitea patch: $patch"
+  git apply --check --ignore-whitespace "$patch_dir/$patch"
+  git apply --ignore-whitespace "$patch_dir/$patch"
+done
+EOF
 RUN go mod tidy
 RUN make frontend
 

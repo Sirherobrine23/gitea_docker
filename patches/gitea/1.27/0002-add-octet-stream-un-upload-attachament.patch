@@ -1,0 +1,46 @@
+From 449d27b9ce1498bfef29c0944d1ea925be10798e Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Tue, 30 Jun 2026 15:57:58 -0300
+Subject: [PATCH 2/6] add octet stream un upload attachament
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/api/v1/repo/release_attachment.go | 11 ++++++++---
+ 1 file changed, 8 insertions(+), 3 deletions(-)
+
+diff --git a/routers/api/v1/repo/release_attachment.go b/routers/api/v1/repo/release_attachment.go
+index 915ac725b0..9c341e0394 100644
+--- a/routers/api/v1/repo/release_attachment.go
++++ b/routers/api/v1/repo/release_attachment.go
+@@ -218,20 +218,25 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
+ 	// Get uploaded file from request
+ 	var filename string
+ 	var uploaderFile *attachment_service.UploaderFile
+-	if strings.HasPrefix(strings.ToLower(ctx.Req.Header.Get("Content-Type")), "multipart/form-data") {
++
++	switch bodyContentType := strings.ToLower(ctx.Req.Header.Get("Content-Type")); {
++	case strings.HasPrefix(bodyContentType, "multipart/form-data"):
+ 		file, header, err := ctx.Req.FormFile("attachment")
+ 		if err != nil {
+ 			ctx.APIErrorInternal(err)
+ 			return
+ 		}
+ 		defer file.Close()
+-
++	
+ 		filename = header.Filename
+ 		if name := ctx.FormString("name"); name != "" {
+ 			filename = name
+ 		}
+ 		uploaderFile = attachment_service.NewLimitedUploaderKnownSize(file, header.Size)
+-	} else {
++	case strings.HasPrefix(bodyContentType, "application/octet-stream"):
++		filename = ctx.Req.URL.Query().Get("name")
++		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
++	default:
+ 		filename = ctx.FormString("name")
+ 		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
+ 	}
+-- 
+2.55.0
+

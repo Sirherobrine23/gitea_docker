@@ -1,0 +1,263 @@
+From 916bb1ae24f3765c9661c3145a2360d91c150de3 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Mon, 6 Jul 2026 19:46:20 -0300
+Subject: [PATCH 3/6] add simples block
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ cmd/web.go                  |  14 +++
+ modules/setting/blockers.go | 204 ++++++++++++++++++++++++++++++++++++
+ modules/setting/setting.go  |   1 +
+ 3 files changed, 219 insertions(+)
+ create mode 100644 modules/setting/blockers.go
+
+diff --git a/cmd/web.go b/cmd/web.go
+index 5644f37d23..46658fb289 100644
+--- a/cmd/web.go
++++ b/cmd/web.go
+@@ -336,6 +336,20 @@ func listen(m http.Handler, handleRedirector bool) error {
+ 		log.Info("LFS server enabled")
+ 	}
+ 
++	// Start block process
++	go setting.ProcessBlockConfig()
++
++	originalHandle := m
++	m = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if setting.IsBlock(r) {
++			w.WriteHeader(http.StatusBadRequest)
++			w.Write(nil)
++			return
++		}
++
++		originalHandle.ServeHTTP(w, r)
++	})
++
+ 	var err error
+ 	switch setting.Protocol {
+ 	case setting.HTTP:
+diff --git a/modules/setting/blockers.go b/modules/setting/blockers.go
+new file mode 100644
+index 0000000000..ff338adc97
+--- /dev/null
++++ b/modules/setting/blockers.go
+@@ -0,0 +1,204 @@
++package setting
++
++import (
++	"context"
++	"fmt"
++	stdlog "log"
++	"net/http"
++	"net/netip"
++	"os"
++	"regexp"
++	"strings"
++	"time"
++	"unicode"
++
++	"gitea.dev/modules/json"
++	"gitea.dev/modules/log"
++	"sirherobrine23.com.br/Sirherobrine23/whois"
++)
++
++type BlockerConfigContext string
++
++type BlockerConfig struct {
++	CIDR   []string `ini:"cidr" delim:"," json:"cidr"`
++	ASN    []string `ini:"asn" delim:"," json:"asn"`
++	Header []string `ini:"-" json:"headers"`
++}
++
++const (
++	BlockConfigValue BlockerConfigContext = "config-block"
++)
++
++var (
++	glbRegex     = map[*regexp.Regexp]struct{}{}
++	glbPrefix    = map[netip.Prefix]struct{}{}
++	BlockConfigs = [2]*BlockerConfig{}
++)
++
++func ProcessBlockConfig() {
++	for {
++		log.Info("Updating Block configs")
++		for _, BlockConfig := range BlockConfigs {
++			if BlockConfig == nil {
++				continue
++			}
++			if len(BlockConfig.CIDR) > 0 {
++				for index, raw := range BlockConfig.CIDR {
++					prefix, err := netip.ParsePrefix(raw)
++					if err != nil {
++						stdlog.Fatalf("error parse CIDR in %d %q, err: %s", index, raw, err)
++					}
++					glbPrefix[prefix] = struct{}{}
++					log.Debug("CIDR for block: %s", prefix.String())
++				}
++			}
++
++			if len(BlockConfig.ASN) > 0 {
++				ctx := context.Background()
++				for _, query := range BlockConfig.ASN {
++					query = strings.ToUpper(query)
++
++					switch v := strings.TrimFunc(query, func(r rune) bool { return !unicode.IsUpper(r) }); v {
++					case "ASN":
++						log.Info("Loading ip address for ASN: %q", query)
++						if result, err := whois.RDAPLookup(ctx, query); err == nil {
++							cidrs, err := result.Normalize().GetCIDRs()
++							if err != nil {
++								stdlog.Fatalf("RDAP: cannot get ASN cidrs: %s", err)
++							}
++
++							for _, prefix := range cidrs {
++								glbPrefix[prefix] = struct{}{}
++								log.Debug("CIDR for %q: %s", query, prefix.String())
++							}
++							continue
++						}
++
++						if result, err := whois.Lookup(ctx, query); err == nil {
++							cidrs, err := result.Normalize().GetCIDRs()
++							if err != nil {
++								stdlog.Fatalf("WHOIS: cannot get ASN cidrs: %s", err)
++							}
++
++							for _, prefix := range cidrs {
++								glbPrefix[prefix] = struct{}{}
++								log.Debug("CIDR for %q: %s", query, prefix.String())
++							}
++							continue
++						}
++					case "AS":
++						log.Info("Loading ip address for AS: %q", query)
++						isAddr := func(r rune) bool {
++							return !(unicode.IsNumber(r) || unicode.IsLetter(r) || r == ':' || r == '/' || r == '.')
++						}
++						if response, err := whois.Query(ctx, "whois.radb.net", fmt.Sprintf("!g%s", query)); err == nil {
++							for p := range strings.FieldsFuncSeq(response.Body, isAddr) {
++								if p != "" {
++									if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
++										glbPrefix[cidr] = struct{}{}
++										log.Debug("CIDR for %q: %s", query, cidr.String())
++									}
++								}
++							}
++						}
++
++						if response, err := whois.Query(context.Background(), "whois.ripe.net", fmt.Sprintf("-i origin %s", query)); err == nil {
++							for line := range strings.SplitSeq(response.Body, "\n") {
++								line = strings.TrimSpace(line)
++								if routev4, okv4 := strings.CutPrefix(line, "route:"); okv4 {
++									for p := range strings.FieldsFuncSeq(routev4, isAddr) {
++										if p != "" {
++											if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
++												glbPrefix[cidr] = struct{}{}
++												log.Debug("CIDR for %q: %s", query, cidr.String())
++											}
++										}
++									}
++								}
++								if routev6, okv6 := strings.CutPrefix(line, "route6:"); okv6 {
++									for p := range strings.FieldsFuncSeq(routev6, isAddr) {
++										if p != "" {
++											if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
++												glbPrefix[cidr] = struct{}{}
++												log.Debug("CIDR for %q: %s", query, cidr.String())
++											}
++										}
++									}
++								}
++							}
++						}
++					default:
++						log.Warn("invalid value: %q", v)
++					}
++				}
++			}
++
++			if len(BlockConfig.Header) > 0 {
++				for index, h := range BlockConfig.Header {
++					rg, err := regexp.Compile(h)
++					if err != nil {
++						stdlog.Fatalf("error on test header regex in %d: %q", index, h)
++					}
++					glbRegex[rg] = struct{}{}
++				}
++			}
++		}
++
++		blockNextUpdate := time.Now().Add(time.Hour * 2)
++		log.Info("Next update %s, until %s", blockNextUpdate, time.Until(blockNextUpdate))
++		<-time.After(time.Until(blockNextUpdate))
++	}
++}
++
++func loadBlockConfig(rootCfg ConfigProvider) {
++	var BlockConfig BlockerConfig
++	sec := rootCfg.Section("block")
++	sec.MapTo(&BlockConfig)
++	BlockConfigs[0] = &BlockConfig
++
++	if sec.HasKey("CONFIG_FILE") {
++		var BlockConfig BlockerConfig
++		if f, err := os.Open(sec.Key("CONFIG_FILE").String()); err == nil {
++			defer f.Close()
++			if err := json.NewDecoder(f).Decode(&BlockConfig); err == nil {
++				BlockConfigs[1] = &BlockConfig
++			}
++		}
++	}
++}
++
++// Get blocker and filter
++func IsBlock(r *http.Request) bool {
++	userAgent := r.Header.Get("User-Agent")
++	if userAgent == "" { // Always block without user-agent header
++		return true
++	}
++
++	if addr := r.Header.Get("X-Real-IP"); addr != "" {
++		if addrIP, err := netip.ParseAddrPort(addr); err == nil {
++			for prefix := range glbPrefix {
++				if prefix.Contains(addrIP.Addr()) {
++					return true
++				}
++			}
++		}
++	}
++
++	if addr := r.RemoteAddr; addr != "" {
++		if addrIP, err := netip.ParseAddrPort(addr); err == nil {
++			for prefix := range glbPrefix {
++				if prefix.Contains(addrIP.Addr()) {
++					return true
++				}
++			}
++		}
++	}
++
++	for r := range glbRegex {
++		if r.MatchString(userAgent) {
++			return true
++		}
++	}
++
++	return false
++}
+diff --git a/modules/setting/setting.go b/modules/setting/setting.go
+index 483b99622c..cf844430fe 100644
+--- a/modules/setting/setting.go
++++ b/modules/setting/setting.go
+@@ -157,6 +157,7 @@ func loadCommonSettingsFrom(cfg ConfigProvider) error {
+ 	loadMirrorFrom(cfg)
+ 	loadMarkupFrom(cfg)
+ 	loadGlobalLockFrom(cfg)
++	loadBlockConfig(cfg)
+ 	loadOtherFrom(cfg)
+ 	return nil
+ }
+-- 
+2.55.0
+
