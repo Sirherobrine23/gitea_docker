@@ -1,0 +1,495 @@
+From 697eccb99ba00490d529584d3da6cb1bcf030562 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Sun, 2 Aug 2026 22:45:52 -0300
+Subject: [PATCH 8/8] refactor(repo): add websocket heartbeat for live issues
+
+Implement a heartbeat mechanism in the `issue-live` WebSocket connection
+to improve stability and connection reliability. Added `ping`/`pong`
+logic and improved SharedWorker reconnect handling.
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ go.mod                                        |   1 +
+ go.sum                                        |   2 +
+ routers/web/repo/issue_live.go                |  26 +++-
+ .../js/features/comp/ComboMarkdownEditor.ts   |   7 +-
+ web_src/js/features/dropzone.ts               |  30 ++--
+ web_src/js/features/repo-issue-live.ts        |   5 +-
+ web_src/js/issue-live.sharedworker.ts         | 128 ++++++++++++++++--
+ web_src/js/modules/issue-live-worker.ts       |   4 +
+ 8 files changed, 171 insertions(+), 32 deletions(-)
+
+diff --git a/go.mod b/go.mod
+index e905f84838..78e2f77337 100644
+--- a/go.mod
++++ b/go.mod
+@@ -119,6 +119,7 @@ require (
+ 	gopkg.in/ini.v1 v1.67.3
+ 	modernc.org/sqlite v1.54.0
+ 	mvdan.cc/xurls/v2 v2.6.0
++	sirherobrine23.com.br/Sirherobrine23/whois v0.1.0
+ 	strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab
+ 	xorm.io/builder v0.3.13
+ 	xorm.io/xorm v1.4.1
+diff --git a/go.sum b/go.sum
+index b8d9fb9af5..2b5b2d3d80 100644
+--- a/go.sum
++++ b/go.sum
+@@ -953,6 +953,8 @@ mvdan.cc/xurls/v2 v2.6.0 h1:3NTZpeTxYVWNSokW3MKeyVkz/j7uYXYiMtXRUfmjbgI=
+ mvdan.cc/xurls/v2 v2.6.0/go.mod h1:bCvEZ1XvdA6wDnxY7jPPjEmigDtvtvPXAD/Exa9IMSk=
+ pgregory.net/rapid v0.4.2 h1:lsi9jhvZTYvzVpeG93WWgimPRmiJQfGFRNTEZh1dtY0=
+ pgregory.net/rapid v0.4.2/go.mod h1:UYpPVyjFHzYBGHIxLFoupi8vwk6rXNzRY9OMvVxFIOU=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0 h1:3xrfmFaewGIwdcUx3uIrvm58zNKR0/mqYp6crYyMw2Y=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0/go.mod h1:5mHKLa1kL2BX5pO/jLtdbtYNJICcvFe7Trc8E5mG+JY=
+ strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab h1:3IZDVyI8uBmZko6pwm39f7mE0aTY7LViNdQHMeH7U60=
+ strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab/go.mod h1:FJGmPh3vz9jSos1L/F91iAgnC/aejc0wIIrF2ZwJxdY=
+ xorm.io/builder v0.3.13 h1:a3jmiVVL19psGeXx8GIurTp7p0IIgqeDmwhcR6BAOAo=
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index 393e5992ae..6343c5f026 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -505,7 +505,7 @@ func issueLiveReadResume(ctx stdcontext.Context, conn *websocket.Conn) ([]issueL
+ 	return message.States, message.Initialized, nil
+ }
+ 
+-func issueLiveReadLoop(ctx stdcontext.Context, cancel stdcontext.CancelFunc, conn *websocket.Conn, refresh chan<- struct{}) {
++func issueLiveReadLoop(ctx stdcontext.Context, cancel stdcontext.CancelFunc, conn *websocket.Conn, refresh, heartbeat chan<- struct{}) {
+ 	defer cancel()
+ 	for {
+ 		messageType, payload, err := conn.Read(ctx)
+@@ -517,12 +517,20 @@ func issueLiveReadLoop(ctx stdcontext.Context, cancel stdcontext.CancelFunc, con
+ 		}
+ 
+ 		var message issueLiveClientMessage
+-		if json.Unmarshal(payload, &message) != nil || message.Type != "refresh" {
++		if json.Unmarshal(payload, &message) != nil {
+ 			continue
+ 		}
+-		select {
+-		case refresh <- struct{}{}:
+-		default:
++		switch message.Type {
++		case "refresh":
++			select {
++			case refresh <- struct{}{}:
++			default:
++			}
++		case "ping":
++			select {
++			case heartbeat <- struct{}{}:
++			default:
++			}
+ 		}
+ 	}
+ }
+@@ -552,6 +560,7 @@ func IssueLive(ctx *context.Context) {
+ 	brokerRefresh, unregisterRefresh := registerIssueLiveRefresh(ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
+ 	defer unregisterRefresh()
+ 	clientRefresh := make(chan struct{}, 1)
++	clientHeartbeat := make(chan struct{}, 1)
+ 
+ 	initialHTML, err := prepareIssueLiveSnapshot(ctx)
+ 	if err != nil {
+@@ -629,7 +638,7 @@ func IssueLive(ctx *context.Context) {
+ 		}
+ 	}
+ 
+-	go issueLiveReadLoop(connectionCtx, cancel, conn, clientRefresh)
++	go issueLiveReadLoop(connectionCtx, cancel, conn, clientRefresh, clientHeartbeat)
+ 
+ 	refreshTicker := time.NewTicker(issueLiveSafetyRefreshInterval)
+ 	defer refreshTicker.Stop()
+@@ -689,6 +698,11 @@ func IssueLive(ctx *context.Context) {
+ 					goto refreshTimeline
+ 				}
+ 			}
++		case <-clientHeartbeat:
++			if err := issueLiveWrite(connectionCtx, conn, issueLiveServerMessage{Type: "pong"}); err != nil {
++				return
++			}
++			continue
+ 		case <-pingTicker.C:
+ 			pingCtx, pingCancel := stdcontext.WithTimeout(connectionCtx, issueLiveWriteTimeout)
+ 			err := conn.Ping(pingCtx)
+diff --git a/web_src/js/features/comp/ComboMarkdownEditor.ts b/web_src/js/features/comp/ComboMarkdownEditor.ts
+index 70ddf2185f..ea4ea11568 100644
+--- a/web_src/js/features/comp/ComboMarkdownEditor.ts
++++ b/web_src/js/features/comp/ComboMarkdownEditor.ts
+@@ -21,7 +21,7 @@ import {
+   replaceTextareaSelection,
+   triggerEditorContentChanged,
+ } from './EditorMarkdown.ts';
+-import {DropzoneCustomEventReloadFiles, initDropzone} from '../dropzone.ts';
++import {DropzoneCustomEventReloadFiles, DropzoneCustomEventResetFiles, initDropzone} from '../dropzone.ts';
+ import {createTippy} from '../../modules/tippy.ts';
+ import {initTabSwitcher} from '../../modules/fomantic/tab.ts';
+ import type EasyMDE from 'easymde';
+@@ -192,6 +192,11 @@ export class ComboMarkdownEditor {
+     this.attachedDropzoneInst.emit(DropzoneCustomEventReloadFiles);
+   }
+ 
++  dropzoneResetFiles() {
++    if (!this.dropzone) return;
++    this.attachedDropzoneInst.emit(DropzoneCustomEventResetFiles);
++  }
++
+   dropzoneSubmitReload() {
+     if (!this.dropzone) return;
+     this.attachedDropzoneInst.emit('submit');
+diff --git a/web_src/js/features/dropzone.ts b/web_src/js/features/dropzone.ts
+index 76b06de111..8a2f262551 100644
+--- a/web_src/js/features/dropzone.ts
++++ b/web_src/js/features/dropzone.ts
+@@ -12,6 +12,7 @@ type CustomDropzoneFile = Dropzone.DropzoneFile & {uuid: string};
+ 
+ // dropzone has its owner event dispatcher (emitter)
+ export const DropzoneCustomEventReloadFiles = 'dropzone-custom-reload-files';
++export const DropzoneCustomEventResetFiles = 'dropzone-custom-reset-files';
+ export const DropzoneCustomEventRemovedFile = 'dropzone-custom-removed-file';
+ export const DropzoneCustomEventUploadDone = 'dropzone-custom-upload-done';
+ 
+@@ -89,6 +90,21 @@ export async function initDropzone(dropzoneEl: HTMLElement) {
+   // "http://localhost:3000/owner/repo/issues/[object%20Event]"
+   // the reason is that the preview "callback(dataURL)" is assign to "img.onerror" then "thumbnail" uses the error object as the dataURL and generates '<img src="[object Event]">'
+   const dzInst = await createDropzone(dropzoneEl, opts);
++
++  const resetDropzoneFiles = () => {
++    disableRemovedfileEvent = true;
++    try {
++      dzInst.removeAllFiles(true);
++    } finally {
++      disableRemovedfileEvent = false;
++    }
++
++    dropzoneEl.querySelector('.files')!.replaceChildren();
++    for (const el of dropzoneEl.querySelectorAll('.dz-preview')) el.remove();
++    fileUuidDict = {};
++    dropzoneEl.classList.remove('dz-started');
++  };
++
+   dzInst.on('success', (file: CustomDropzoneFile, resp: any) => {
+     file.uuid = resp.uuid;
+     fileUuidDict[file.uuid] = {submitted: false};
+@@ -120,14 +136,7 @@ export async function initDropzone(dropzoneEl: HTMLElement) {
+       if (!listAttachmentsUrl) return;
+       const resp = await GET(listAttachmentsUrl);
+       const respData = await resp.json();
+-      // do not trigger the "removedfile" event, otherwise the attachments would be deleted from server
+-      disableRemovedfileEvent = true;
+-      dzInst.removeAllFiles(true);
+-      disableRemovedfileEvent = false;
+-
+-      dropzoneEl.querySelector('.files')!.replaceChildren();
+-      for (const el of dropzoneEl.querySelectorAll('.dz-preview')) el.remove();
+-      fileUuidDict = {};
++      resetDropzoneFiles();
+       for (const attachment of respData) {
+         const file = {name: attachment.name, uuid: attachment.uuid, size: attachment.size};
+         dzInst.emit('addedfile', file);
+@@ -141,9 +150,6 @@ export async function initDropzone(dropzoneEl: HTMLElement) {
+         const input = createElementFromAttrs('input', {name: 'files', type: 'hidden', id: `dropzone-file-${file.uuid}`, value: file.uuid});
+         dropzoneEl.querySelector('.files')!.append(input);
+       }
+-      if (!dropzoneEl.querySelector('.dz-preview')) {
+-        dropzoneEl.classList.remove('dz-started');
+-      }
+     } catch (error) {
+       // TODO: if listing the existing attachments failed, it should stop from operating the content or attachments,
+       //  otherwise the attachments might be lost.
+@@ -152,6 +158,8 @@ export async function initDropzone(dropzoneEl: HTMLElement) {
+     }
+   });
+ 
++  dzInst.on(DropzoneCustomEventResetFiles, resetDropzoneFiles);
++
+   dzInst.on('error', (file, message) => {
+     showErrorToast(`Dropzone upload error: ${message}`);
+     dzInst.removeFile(file);
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index ef1cdeacff..7f2d09a814 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -155,7 +155,7 @@ function currentResumeMessage(): IssueLiveClientMessage {
+   return {
+     type: 'resume',
+     initialized: synchronizedBaseline,
+-    states: synchronizedBaseline ? [...synchronizedStates.values()] : initialResumeStates(),
++    states: synchronizedBaseline ? synchronizedStates.values().toArray() : initialResumeStates(),
+   };
+ }
+ 
+@@ -421,7 +421,7 @@ function initLiveCommentSubmit(worker: IssueLiveSharedWorker) {
+       const editor = getComboMarkdownEditor(form.querySelector('.combo-markdown-editor'));
+       editor?.value('');
+       editor?.textarea.dispatchEvent(new Event('input', {bubbles: true}));
+-      editor?.dropzoneReloadFiles();
++      editor?.dropzoneResetFiles();
+       worker.refresh();
+     } catch (error) {
+       console.error(error);
+@@ -474,6 +474,7 @@ export function initRepoIssueLive() {
+     if (document.visibilityState !== 'visible') return;
+     flushPendingOperations();
+     updateSharedWorkerResumeState();
++    worker.check();
+   };
+   document.addEventListener('visibilitychange', flushVisiblePendingOperations);
+ 
+diff --git a/web_src/js/issue-live.sharedworker.ts b/web_src/js/issue-live.sharedworker.ts
+index 43e9372605..ff4cd971d8 100644
+--- a/web_src/js/issue-live.sharedworker.ts
++++ b/web_src/js/issue-live.sharedworker.ts
+@@ -16,13 +16,19 @@ type IssueLiveClientMessage = {
+ };
+ 
+ type WorkerCommand = {
+-  type: 'start' | 'refresh' | 'status' | 'close' | 'resume',
++  type: 'start' | 'refresh' | 'status' | 'close' | 'resume' | 'check',
+   url?: string,
+   resume?: IssueLiveClientMessage,
+ };
+ 
+ type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
+ 
++const reconnectInitialDelay = 1000;
++const reconnectMaxDelay = 10000;
++const connectTimeout = 10000;
++const heartbeatInterval = 15000;
++const heartbeatTimeout = 10000;
++
+ function normalizeResumeMessage(message?: IssueLiveClientMessage): IssueLiveClientMessage {
+   if (message?.type !== 'resume' || !Array.isArray(message.states)) {
+     return {type: 'resume', initialized: false, states: []};
+@@ -35,7 +41,10 @@ class SocketSource {
+   socket: WebSocket | null = null;
+   clients = new Set<MessagePort>();
+   reconnectTimer: number | null = null;
+-  reconnectDelay = 1000;
++  reconnectDelay = reconnectInitialDelay;
++  connectTimer: number | null = null;
++  heartbeatTimer: number | null = null;
++  heartbeatTimeoutTimer: number | null = null;
+   closed = false;
+   pendingRefresh = false;
+   state: ConnectionState = 'closed';
+@@ -51,6 +60,7 @@ class SocketSource {
+     this.updateResumeMessage(resumeMessage);
+     this.clients.add(port);
+     this.sendStatus(port);
++    this.checkConnection();
+   }
+ 
+   deregister(port: MessagePort) {
+@@ -77,24 +87,70 @@ class SocketSource {
+     port.postMessage({type: 'connection-status', state: this.state});
+   }
+ 
++  clearReconnectTimer() {
++    if (this.reconnectTimer === null) return;
++    clearTimeout(this.reconnectTimer);
++    this.reconnectTimer = null;
++  }
++
++  clearConnectTimer() {
++    if (this.connectTimer === null) return;
++    clearTimeout(this.connectTimer);
++    this.connectTimer = null;
++  }
++
++  clearHeartbeatTimeout() {
++    if (this.heartbeatTimeoutTimer === null) return;
++    clearTimeout(this.heartbeatTimeoutTimer);
++    this.heartbeatTimeoutTimer = null;
++  }
++
++  stopHeartbeat() {
++    if (this.heartbeatTimer !== null) {
++      clearInterval(this.heartbeatTimer);
++      this.heartbeatTimer = null;
++    }
++    this.clearHeartbeatTimeout();
++  }
++
++  resetSocket(socket: WebSocket, state: ConnectionState) {
++    if (this.socket !== socket) return;
++    this.socket = null;
++    this.clearConnectTimer();
++    this.stopHeartbeat();
++    this.setState(state);
++    try {
++      socket.close();
++    } catch {
++      // The socket is already unusable.
++    }
++    this.scheduleReconnect();
++  }
++
+   connect() {
+     if (this.closed || this.socket?.readyState === WebSocket.CONNECTING || this.socket?.readyState === WebSocket.OPEN) return;
+ 
++    this.clearReconnectTimer();
+     this.setState('connecting');
+     const socket = new WebSocket(this.url);
+     this.socket = socket;
++    this.connectTimer = self.setTimeout(() => {
++      this.resetSocket(socket, 'error');
++    }, connectTimeout);
+ 
+     socket.addEventListener('open', () => {
+       if (this.socket !== socket) return;
++      this.clearConnectTimer();
+       try {
+         socket.send(JSON.stringify(this.resumeMessage));
+       } catch (error) {
+         this.notify({type: 'worker-error', message: String(error)});
+-        socket.close(1011, 'Unable to resume');
++        this.resetSocket(socket, 'error');
+         return;
+       }
+-      this.reconnectDelay = 1000;
++      this.reconnectDelay = reconnectInitialDelay;
+       this.setState('open');
++      this.startHeartbeat();
+       if (this.pendingRefresh) {
+         this.pendingRefresh = false;
+         this.sendRefresh();
+@@ -102,22 +158,29 @@ class SocketSource {
+     });
+ 
+     socket.addEventListener('message', (event) => {
++      if (this.socket !== socket) return;
+       let message: Record<string, unknown>;
+       try {
+         message = JSON.parse(String(event.data));
+       } catch {
+         message = {type: 'message', data: event.data};
+       }
++      if (message.type === 'pong') {
++        this.clearHeartbeatTimeout();
++        return;
++      }
+       this.notify(message);
+     });
+ 
+     socket.addEventListener('error', () => {
+-      if (this.socket === socket) this.setState('error');
++      this.resetSocket(socket, 'error');
+     });
+ 
+     socket.addEventListener('close', () => {
+       if (this.socket !== socket) return;
+       this.socket = null;
++      this.clearConnectTimer();
++      this.stopHeartbeat();
+       this.setState('closed');
+       this.scheduleReconnect();
+     });
+@@ -126,28 +189,66 @@ class SocketSource {
+   scheduleReconnect() {
+     if (this.closed || !this.clients.size || this.reconnectTimer !== null) return;
+     const delay = this.reconnectDelay;
+-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
++    this.reconnectDelay = Math.min(this.reconnectDelay * 2, reconnectMaxDelay);
+     this.reconnectTimer = self.setTimeout(() => {
+       this.reconnectTimer = null;
+       this.connect();
+     }, delay);
+   }
+ 
++  startHeartbeat() {
++    this.stopHeartbeat();
++    this.heartbeatTimer = self.setInterval(() => this.sendHeartbeat(), heartbeatInterval);
++  }
++
++  sendHeartbeat() {
++    const socket = this.socket;
++    if (socket?.readyState !== WebSocket.OPEN || this.heartbeatTimeoutTimer !== null) return;
++    try {
++      socket.send(JSON.stringify({type: 'ping'}));
++    } catch {
++      this.resetSocket(socket, 'error');
++      return;
++    }
++    this.heartbeatTimeoutTimer = self.setTimeout(() => {
++      this.resetSocket(socket, 'error');
++    }, heartbeatTimeout);
++  }
++
+   sendRefresh() {
+-    if (this.socket?.readyState === WebSocket.OPEN) {
+-      this.socket.send(JSON.stringify({type: 'refresh'}));
++    const socket = this.socket;
++    if (socket?.readyState === WebSocket.OPEN) {
++      try {
++        socket.send(JSON.stringify({type: 'refresh'}));
++      } catch {
++        this.pendingRefresh = true;
++        this.resetSocket(socket, 'error');
++      }
+     } else {
+       this.pendingRefresh = true;
+       this.connect();
+     }
+   }
+ 
+-  close() {
+-    this.closed = true;
++  checkConnection() {
++    if (this.closed || !this.clients.size) return;
+     if (this.reconnectTimer !== null) {
+-      clearTimeout(this.reconnectTimer);
+-      this.reconnectTimer = null;
++      this.clearReconnectTimer();
++      this.connect();
++      return;
++    }
++    if (!this.socket || this.socket.readyState === WebSocket.CLOSED || this.socket.readyState === WebSocket.CLOSING) {
++      this.connect();
++      return;
+     }
++    if (this.socket.readyState === WebSocket.OPEN) this.sendHeartbeat();
++  }
++
++  close() {
++    this.closed = true;
++    this.clearReconnectTimer();
++    this.clearConnectTimer();
++    this.stopHeartbeat();
+     this.socket?.close(1000, 'No active tabs');
+     this.socket = null;
+     this.setState('closed');
+@@ -184,6 +285,7 @@ function detachPort(port: MessagePort) {
+         if (previous?.url === command.url) {
+           previous.updateResumeMessage(command.resume);
+           previous.sendStatus(port);
++          previous.checkConnection();
+           return;
+         }
+         if (previous) detachPort(port);
+@@ -206,6 +308,8 @@ function detachPort(port: MessagePort) {
+         } else {
+           port.postMessage({type: 'connection-status', state: 'closed'});
+         }
++      } else if (command.type === 'check') {
++        sourcesByPort.get(port)?.checkConnection();
+       } else if (command.type === 'close') {
+         detachPort(port);
+         port.close();
+diff --git a/web_src/js/modules/issue-live-worker.ts b/web_src/js/modules/issue-live-worker.ts
+index 2d9892142f..d81e6ed527 100644
+--- a/web_src/js/modules/issue-live-worker.ts
++++ b/web_src/js/modules/issue-live-worker.ts
+@@ -68,6 +68,10 @@ export class IssueLiveSharedWorker {
+     this.sharedWorker.port.postMessage({type: 'status'});
+   }
+ 
++  check() {
++    this.sharedWorker.port.postMessage({type: 'check'});
++  }
++
+   close() {
+     this.sharedWorker.port.postMessage({type: 'close'});
+     this.sharedWorker.port.close();
+-- 
+2.55.0
+

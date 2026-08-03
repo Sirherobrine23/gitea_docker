@@ -1,7 +1,7 @@
-From 0de81322e3c625bde0c96f6039781bf4864c4d4e Mon Sep 17 00:00:00 2001
+From 8bc7bc30c66f297e8f08e23248148d4162a5bf94 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
-Subject: [PATCH 7/7] fix: migrate issue live updates to websocket pubsub base
+Subject: [PATCH 7/8] fix: migrate issue live updates to websocket pubsub base
 
 Use the pub/sub broker introduced by the WebSocket notification subsystem for issue timeline invalidations, keep the permission-aware issue WebSocket endpoint explicit, and render the issue description before generating snapshots so the first timeline entry is not replaced by empty content.
 
@@ -10,11 +10,11 @@ Preserve hashes from initial timeline operations when the baseline arrives, avoi
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
  routers/web/repo/issue_content_history.go     |  5 --
- routers/web/repo/issue_live.go                | 44 ++++++++++++++++++-------
+ routers/web/repo/issue_live.go                | 44 +++++++++++-----
  routers/web/repo/issue_live_hub.go            | 50 +++---------------
  routers/web/repo/issue_live_test.go           | 51 +++++++++++++++++++
  routers/web/repo/issue_view.go                | 23 ++++++---
- web_src/js/features/repo-issue-live.ts        |  5 +--
+ web_src/js/features/repo-issue-live.ts        |  5 +-
  ...edworker.ts => issue-live.sharedworker.ts} |  0
  web_src/js/modules/issue-live-worker.ts       |  2 +-
  8 files changed, 108 insertions(+), 72 deletions(-)
@@ -37,7 +37,7 @@ index e32e7d90f3..08c27fdee3 100644
  	if ctx.Written() {
  		return
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
-index 65c9538929498518c3e510c93ea38ac7fdf0eb92..393e5992ae235179ddab300a1e3de82ba7c239fc 100644
+index 65c9538929..393e5992ae 100644
 --- a/routers/web/repo/issue_live.go
 +++ b/routers/web/repo/issue_live.go
 @@ -10,7 +10,6 @@ import (
@@ -269,10 +269,10 @@ index 602c243104..2479421f99 100644
  	entries, err := issueLiveParseSnapshot(`
  <div data-issue-live-snapshot>
 diff --git a/routers/web/repo/issue_view.go b/routers/web/repo/issue_view.go
-index db9830d450..27f04f16e6 100644
+index 84c501c017..d6426214af 100644
 --- a/routers/web/repo/issue_view.go
 +++ b/routers/web/repo/issue_view.go
-@@ -1086,18 +1086,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
+@@ -1089,18 +1089,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
  	}
  }
  
@@ -307,7 +307,7 @@ index db9830d450..27f04f16e6 100644
  	}
  }
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
-index fa8e5a3a164ec5016efe171aa662cd562f546166..ef1cdeacffcf87dd4e720a675119dfe43c588abd 100644
+index fa8e5a3a16..ef1cdeacff 100644
 --- a/web_src/js/features/repo-issue-live.ts
 +++ b/web_src/js/features/repo-issue-live.ts
 @@ -35,7 +35,7 @@ type MorphOptionsWithCallbacks = {

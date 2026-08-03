@@ -1,7 +1,7 @@
-From 6763a09d4292137ebbf75b80202c5438a1f71184 Mon Sep 17 00:00:00 2001
+From 58ee4056e8a011f5369b3c8bb9112c2fa43b37aa Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:18 -0300
-Subject: [PATCH 1/7] add load env config
+Subject: [PATCH 1/8] add load env config
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
