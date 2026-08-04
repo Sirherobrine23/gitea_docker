@@ -1,4 +1,4 @@
-From 697eccb99ba00490d529584d3da6cb1bcf030562 Mon Sep 17 00:00:00 2001
+From b7606794f305c1e5c50da9565a64f583ba90ee09 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sun, 2 Aug 2026 22:45:52 -0300
 Subject: [PATCH 8/8] refactor(repo): add websocket heartbeat for live issues
@@ -9,41 +9,14 @@ logic and improved SharedWorker reconnect handling.
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- go.mod                                        |   1 +
- go.sum                                        |   2 +
  routers/web/repo/issue_live.go                |  26 +++-
  .../js/features/comp/ComboMarkdownEditor.ts   |   7 +-
  web_src/js/features/dropzone.ts               |  30 ++--
  web_src/js/features/repo-issue-live.ts        |   5 +-
  web_src/js/issue-live.sharedworker.ts         | 128 ++++++++++++++++--
  web_src/js/modules/issue-live-worker.ts       |   4 +
- 8 files changed, 171 insertions(+), 32 deletions(-)
+ 6 files changed, 168 insertions(+), 32 deletions(-)
 
-diff --git a/go.mod b/go.mod
-index e905f84838..78e2f77337 100644
---- a/go.mod
-+++ b/go.mod
-@@ -119,6 +119,7 @@ require (
- 	gopkg.in/ini.v1 v1.67.3
- 	modernc.org/sqlite v1.54.0
- 	mvdan.cc/xurls/v2 v2.6.0
-+	sirherobrine23.com.br/Sirherobrine23/whois v0.1.0
- 	strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab
- 	xorm.io/builder v0.3.13
- 	xorm.io/xorm v1.4.1
-diff --git a/go.sum b/go.sum
-index b8d9fb9af5..2b5b2d3d80 100644
---- a/go.sum
-+++ b/go.sum
-@@ -953,6 +953,8 @@ mvdan.cc/xurls/v2 v2.6.0 h1:3NTZpeTxYVWNSokW3MKeyVkz/j7uYXYiMtXRUfmjbgI=
- mvdan.cc/xurls/v2 v2.6.0/go.mod h1:bCvEZ1XvdA6wDnxY7jPPjEmigDtvtvPXAD/Exa9IMSk=
- pgregory.net/rapid v0.4.2 h1:lsi9jhvZTYvzVpeG93WWgimPRmiJQfGFRNTEZh1dtY0=
- pgregory.net/rapid v0.4.2/go.mod h1:UYpPVyjFHzYBGHIxLFoupi8vwk6rXNzRY9OMvVxFIOU=
-+sirherobrine23.com.br/Sirherobrine23/whois v0.1.0 h1:3xrfmFaewGIwdcUx3uIrvm58zNKR0/mqYp6crYyMw2Y=
-+sirherobrine23.com.br/Sirherobrine23/whois v0.1.0/go.mod h1:5mHKLa1kL2BX5pO/jLtdbtYNJICcvFe7Trc8E5mG+JY=
- strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab h1:3IZDVyI8uBmZko6pwm39f7mE0aTY7LViNdQHMeH7U60=
- strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab/go.mod h1:FJGmPh3vz9jSos1L/F91iAgnC/aejc0wIIrF2ZwJxdY=
- xorm.io/builder v0.3.13 h1:a3jmiVVL19psGeXx8GIurTp7p0IIgqeDmwhcR6BAOAo=
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
 index 393e5992ae..6343c5f026 100644
 --- a/routers/web/repo/issue_live.go

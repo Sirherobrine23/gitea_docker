@@ -1,4 +1,4 @@
-From 8bc7bc30c66f297e8f08e23248148d4162a5bf94 Mon Sep 17 00:00:00 2001
+From e40b6bcc8563c95a87d1229ae4eb5789463a6db6 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
 Subject: [PATCH 7/8] fix: migrate issue live updates to websocket pubsub base
