@@ -1,4 +1,4 @@
-From 3b40d73ff52b1523857845c8de1ac1953b16f6c1 Mon Sep 17 00:00:00 2001
+From a4b3eb576e7e7d483edfba087cd236ececf0f554 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -62,10 +62,10 @@ index 1d63da05..75320de9 100644
  			return errors.New("cache.external_secret (or cache.external_secret_file) must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index 18aaa373..312ede1c 100644
+index 4cb02420..a65a92c3 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
-@@ -39,6 +39,8 @@ func Execute(ctx context.Context) {
+@@ -37,6 +37,8 @@ func Execute(ctx context.Context) {
  	registerCmd.Flags().StringVar(&regArgs.TokenFile, "token-file", "", "Path to a file containing the runner token")
  	registerCmd.Flags().StringVar(&regArgs.RunnerName, "name", "", "Runner name")
  	registerCmd.Flags().StringVar(&regArgs.Labels, "labels", "", "Runner tags, comma separated")
@@ -74,7 +74,7 @@ index 18aaa373..312ede1c 100644
  	registerCmd.Flags().BoolVar(&regArgs.Ephemeral, "ephemeral", false, "Configure the runner to be ephemeral and only ever be able to pick a single job (stricter than --once)")
  	rootCmd.AddCommand(registerCmd)
  
-@@ -52,6 +54,17 @@ func Execute(ctx context.Context) {
+@@ -50,6 +52,17 @@ func Execute(ctx context.Context) {
  	}
  	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
  	daemonCmd.Flags().StringVar(&daemArgs.Labels, "labels", os.Getenv("GITEA_RUNNER_LABELS"), "Runner labels, comma separated. Overrides the labels of an already registered runner")
@@ -92,7 +92,7 @@ index 18aaa373..312ede1c 100644
  	rootCmd.AddCommand(daemonCmd)
  
  	// ./gitea-runner exec
-@@ -80,6 +93,7 @@ func Execute(ctx context.Context) {
+@@ -76,6 +89,7 @@ func Execute(ctx context.Context) {
  	}
  	cacheCmd.Flags().StringVarP(&cacheArgs.Dir, "dir", "d", "", "Cache directory")
  	cacheCmd.Flags().StringVarP(&cacheArgs.Host, "host", "s", "", "Host of the cache server")
@@ -101,10 +101,10 @@ index 18aaa373..312ede1c 100644
  	rootCmd.AddCommand(cacheCmd)
  
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index 2ed6f70e..4cf08c35 100644
+index d1b3a69a..e3418912 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
-@@ -38,6 +38,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -39,6 +39,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  			return fmt.Errorf("invalid configuration: %w", err)
  		}
  
@@ -136,7 +136,7 @@ index 2ed6f70e..4cf08c35 100644
  		initLogging(cfg)
  		log.Infoln("Starting runner daemon")
  
-@@ -202,8 +227,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -236,8 +261,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
  
  type daemonArgs struct {
@@ -149,10 +149,10 @@ index 2ed6f70e..4cf08c35 100644
  
  // resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index 6859522d..3a6cbd6a 100644
+index 1203a849..172dcbd2 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
-@@ -72,13 +72,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
+@@ -73,13 +73,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
  
  // registerArgs represents the arguments for register command
  type registerArgs struct {
@@ -175,7 +175,7 @@ index 6859522d..3a6cbd6a 100644
  }
  
  type registerStage int8
-@@ -103,11 +105,13 @@ var defaultLabels = []string{
+@@ -104,11 +106,13 @@ var defaultLabels = []string{
  }
  
  type registerInputs struct {
@@ -194,24 +194,24 @@ index 6859522d..3a6cbd6a 100644
  }
  
  func (r *registerInputs) validate() error {
-@@ -229,10 +233,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
+@@ -230,10 +234,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
  		token = envToken
  	}
  	inputs := &registerInputs{
--		InstanceAddr: regArgs.InstanceAddr,
--		Token:        token,
--		RunnerName:   regArgs.RunnerName,
+-		InstanceAddr: strings.TrimSpace(regArgs.InstanceAddr),
+-		Token:        strings.TrimSpace(token),
+-		RunnerName:   strings.TrimSpace(regArgs.RunnerName),
 -		Ephemeral:    regArgs.Ephemeral,
-+		InstanceAddr:      regArgs.InstanceAddr,
-+		Token:             token,
-+		RunnerName:        regArgs.RunnerName,
++		InstanceAddr:      strings.TrimSpace(regArgs.InstanceAddr),
++		Token:             strings.TrimSpace(token),
++		RunnerName:        strings.TrimSpace(regArgs.RunnerName),
 +		Ephemeral:         regArgs.Ephemeral,
 +		CacheServer:       regArgs.CacheServer,
 +		CacheServerSecret: regArgs.CacheServerToken,
  	}
  	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
  	// command line flag.
-@@ -338,6 +344,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+@@ -339,6 +345,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
  		log.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
