@@ -3,7 +3,7 @@ module docker_gitea
 go 1.25.0
 
 require (
-	github.com/go-git/go-git/v5 v5.19.1
+	github.com/go-git/go-git/v5 v5.19.2
 	github.com/google/go-containerregistry v0.21.6
 	github.com/sethvargo/go-githubactions v1.3.2
 	golang.org/x/mod v0.37.0
