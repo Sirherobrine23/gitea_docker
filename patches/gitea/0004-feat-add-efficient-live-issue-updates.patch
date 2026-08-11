@@ -1,4 +1,4 @@
-From eef7f20ecb88fd8bf73b2cdec00b0846263f09f5 Mon Sep 17 00:00:00 2001
+From 89036b6022fc80fddd8e37b6dcc5a743e4ae4250 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 4/8] feat: add efficient live issue updates
@@ -33,7 +33,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  create mode 100644 web_src/js/features/repo-issue-live.ts
 
 diff --git a/routers/web/repo/issue.go b/routers/web/repo/issue.go
-index 10c9d7d726..e413abccbb 100644
+index 67e944a323..d66139ab2f 100644
 --- a/routers/web/repo/issue.go
 +++ b/routers/web/repo/issue.go
 @@ -295,6 +295,7 @@ func UpdateIssueTitle(ctx *context.Context) {
@@ -93,7 +93,7 @@ index 10c9d7d726..e413abccbb 100644
  		ctx.JSON(http.StatusOK, map[string]any{
  			"empty": true,
 diff --git a/routers/web/repo/issue_comment.go b/routers/web/repo/issue_comment.go
-index 569b0cf707..9271f4c062 100644
+index dd7ba66e5c..8e0cf578d1 100644
 --- a/routers/web/repo/issue_comment.go
 +++ b/routers/web/repo/issue_comment.go
 @@ -183,6 +183,7 @@ func NewComment(ctx *context.Context) {
@@ -129,10 +129,10 @@ index 569b0cf707..9271f4c062 100644
  		ctx.JSON(http.StatusOK, map[string]any{
  			"empty": true,
 diff --git a/routers/web/repo/issue_label.go b/routers/web/repo/issue_label.go
-index b0c0bb0b79..c79a98f6d1 100644
+index 5004b9d978..0cfd10b465 100644
 --- a/routers/web/repo/issue_label.go
 +++ b/routers/web/repo/issue_label.go
-@@ -227,5 +227,6 @@ func UpdateIssueLabel(ctx *context.Context) {
+@@ -226,5 +226,6 @@ func UpdateIssueLabel(ctx *context.Context) {
  		return
  	}
  
@@ -1078,10 +1078,10 @@ index 0000000000..445cec3a70
 +	assert.Equal(t, "issuecomment-10", states[0].Key)
 +}
 diff --git a/routers/web/web.go b/routers/web/web.go
-index 99ffc06756..0ad7227365 100644
+index 8e986d8dac..1b0d10cba6 100644
 --- a/routers/web/web.go
 +++ b/routers/web/web.go
-@@ -1298,6 +1298,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+@@ -1302,6 +1302,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
  		m.Get("/posters", repo.IssuePullPosters)
  		m.Group("/{index}", func() {
  			m.Get("/info", repo.GetIssueInfo)
@@ -1904,7 +1904,7 @@ index 0000000000..e985b35cb8
 +  window.addEventListener('pageshow', () => socket.resume());
 +}
 diff --git a/web_src/js/index.ts b/web_src/js/index.ts
-index ef586d2201..1a7d753f59 100644
+index bae6d37ab7..1f78cd699c 100644
 --- a/web_src/js/index.ts
 +++ b/web_src/js/index.ts
 @@ -20,6 +20,7 @@ import {initMarkupContent} from './markup/content.ts';
@@ -1915,7 +1915,7 @@ index ef586d2201..1a7d753f59 100644
  import {initRepoEllipsisButton, initCommitStatuses, initAvatarStackPopup, initCommitFileHistoryFollowRename} from './features/repo-commit.ts';
  import {initRepoTopicBar} from './features/repo-home.ts';
  import {initAdminCommon} from './features/admin/common.ts';
-@@ -127,6 +128,7 @@ const initPerformanceTracer = callInitFunctions([
+@@ -128,6 +129,7 @@ const initPerformanceTracer = callInitFunctions([
    initRepoIssueContentHistory,
    initRepoIssueList,
    initRepoIssueFilterItemLabel,

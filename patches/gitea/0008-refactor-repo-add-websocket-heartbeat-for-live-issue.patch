@@ -1,4 +1,4 @@
-From b7606794f305c1e5c50da9565a64f583ba90ee09 Mon Sep 17 00:00:00 2001
+From 363b4b4f7480e971f7a94971502c8ec5a2bbb98c Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sun, 2 Aug 2026 22:45:52 -0300
 Subject: [PATCH 8/8] refactor(repo): add websocket heartbeat for live issues

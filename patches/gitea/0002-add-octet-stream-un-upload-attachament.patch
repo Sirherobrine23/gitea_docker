@@ -1,4 +1,4 @@
-From 5377fdb61017bce2393abb781e77f5b5db0199b4 Mon Sep 17 00:00:00 2001
+From d2ab40d6560f9a3a75ff3b22e77e0ebef6a06dcf Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:58 -0300
 Subject: [PATCH 2/8] add octet stream un upload attachament
@@ -9,7 +9,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/routers/api/v1/repo/release_attachment.go b/routers/api/v1/repo/release_attachment.go
-index 915ac725b0..8325e8fc3f 100644
+index ea78305748..7db9d27fdf 100644
 --- a/routers/api/v1/repo/release_attachment.go
 +++ b/routers/api/v1/repo/release_attachment.go
 @@ -218,7 +218,9 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
