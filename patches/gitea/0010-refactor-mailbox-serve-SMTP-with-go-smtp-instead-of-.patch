@@ -1,0 +1,1102 @@
+From 7aaf884b068a547a093cf50aa3dde0fd08a0b617 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 18 Aug 2026 22:02:27 +0000
+Subject: [PATCH 10/17] refactor(mailbox): serve SMTP with go-smtp instead of a
+ hand-written server
+
+The IMAP and DKIM/DMARC layers already used github.com/emersion/go-imap and
+go-msgauth, but SMTP was 604 lines of hand-written protocol handling. That
+file was where all three protocol defects fixed in the previous commit lived:
+unbounded line buffering, incomplete dot-unstuffing and lossy CRLF trimming.
+go-smtp implements all of it, so replace the parser with its Backend/Session
+interfaces and keep only the Gitea-specific behaviour.
+
+The server now delegates command parsing, STARTTLS, SASL, DATA transparency,
+SIZE advertisement, and the line, message and recipient limits to the library,
+which is configured from the same [mailbox] settings as before. Gitea keeps
+the session backend: authentication against Gitea accounts, sender ownership
+checks, recipient resolution, DKIM signing on submission, inbound SPF/DKIM/DMARC
+policy, and delivery into the database.
+
+AUTH LOGIN is implemented locally as a sasl.Server because go-sasl provides
+only a client for that mechanism, and several desktop clients still use it.
+
+netListen moves to server.go now that both listeners share it.
+
+Tests replace the parser unit tests, which no longer have a subject, with
+exchanges against a real go-smtp server on a loopback port: submission
+refusing a return path before AUTH, PLAIN and LOGIN rejecting bad
+credentials, and SIZE/AUTH advertisement following configuration.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ docs/mailbox-server.md        |  19 +-
+ go.mod                        |   3 +-
+ go.sum                        |   2 +
+ services/mailbox/imap.go      |   6 -
+ services/mailbox/server.go    |   7 +
+ services/mailbox/smtp.go      | 586 +++++++++-------------------------
+ services/mailbox/smtp_test.go | 204 ++++++------
+ 7 files changed, 294 insertions(+), 533 deletions(-)
+
+diff --git a/docs/mailbox-server.md b/docs/mailbox-server.md
+index 211fee02ba..4b3391b5e3 100644
+--- a/docs/mailbox-server.md
++++ b/docs/mailbox-server.md
+@@ -124,6 +124,23 @@ The raw RFC 5322 message is retained for IMAP and `.eml` download. Parsed envelo
+ 
+ ## Protocol and security scope
+ 
+-The integrated server implements the mailbox-facing SMTP/ESMTP path (including STARTTLS, AUTH PLAIN/LOGIN, local recipient validation, authenticated relay, size/recipient limits and null reverse paths) and an IMAP4 server backed by the same database storage. HTML mail is sanitized before rendering in the authenticated web UI.
++## Libraries
++
++The protocol layers are provided by the `github.com/emersion` mail stack rather than hand-written:
++
++| Concern | Library |
++| --- | --- |
++| SMTP/ESMTP server (STARTTLS, AUTH, SIZE, line and message limits, DATA transparency) | `github.com/emersion/go-smtp` |
++| SASL mechanisms | `github.com/emersion/go-sasl` |
++| IMAP4rev1 server | `github.com/emersion/go-imap` |
++| DKIM, DMARC, Authentication-Results | `github.com/emersion/go-msgauth` |
++| MIME parsing | `github.com/emersion/go-message`, `github.com/jhillyerd/enmime` |
++| SPF | `blitiri.com.ar/go/spf` |
++
++Gitea supplies only the parts that are specific to it: the session backends, recipient resolution against Gitea accounts and aliases, delivery into the database, and the sender-authentication policy. `AUTH LOGIN` is the one protocol detail implemented here, because `go-sasl` ships only a client for that mechanism.
++
++## Limitations
++
++The integrated server covers the mailbox-facing SMTP path (local recipient validation, authenticated relay and null reverse paths) and an IMAP4 server backed by the same database storage. HTML mail is sanitized before rendering in the authenticated web UI.
+ 
+ Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution, an outbound retry queue, bounce processing, reputation/greylisting, antivirus or content-spam filtering. DKIM signing plus inbound DKIM/SPF/DMARC authentication are native, but a production Internet mail deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the deployment boundary.
+diff --git a/go.mod b/go.mod
+index 6bcf2b190b..baba798705 100644
+--- a/go.mod
++++ b/go.mod
+@@ -42,6 +42,8 @@ require (
+ 	github.com/emersion/go-imap v1.2.1
+ 	github.com/emersion/go-message v0.18.1
+ 	github.com/emersion/go-msgauth v0.7.0
++	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
++	github.com/emersion/go-smtp v0.25.0
+ 	github.com/emirpasic/gods v1.18.1
+ 	github.com/ethantkoenig/rupture v1.0.1
+ 	github.com/felixge/fgprof v0.9.5
+@@ -179,7 +181,6 @@ require (
+ 	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
+ 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
+ 	github.com/davidmz/go-pageant v1.0.2 // indirect
+-	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
+ 	github.com/fatih/color v1.19.0 // indirect
+ 	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
+ 	github.com/git-lfs/pktline v0.0.0-20230103162542-ca444d533ef1 // indirect
+diff --git a/go.sum b/go.sum
+index bdd8645e74..64acd77bff 100644
+--- a/go.sum
++++ b/go.sum
+@@ -263,6 +263,8 @@ github.com/emersion/go-msgauth v0.7.0/go.mod h1:mmS9I6HkSovrNgq0HNXTeu8l3sRAAuQ9
+ github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
+ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 h1:oP4q0fw+fOSWn3DfFi4EXdT+B+gTtzx8GC9xsc26Znk=
+ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
++github.com/emersion/go-smtp v0.25.0 h1:krfiHrme2JbJYDh0DGuSRbvPpbnQTH/v9CIfPincl1I=
++github.com/emersion/go-smtp v0.25.0/go.mod h1:ZtRRkbTyp2XTHCA+BmyTFTrj8xY4I+b4McvHxCU2gsQ=
+ github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594/go.mod h1:aqO8z8wPrjkscevZJFVE1wXJrLpC5LtJG7fqLOsPb2U=
+ github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=
+ github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
+diff --git a/services/mailbox/imap.go b/services/mailbox/imap.go
+index f89c37cdc0..9c764616fd 100644
+--- a/services/mailbox/imap.go
++++ b/services/mailbox/imap.go
+@@ -79,12 +79,6 @@ func initIMAP(ctx context.Context, tlsConfig *tls.Config) error {
+ 	return nil
+ }
+ 
+-// netListen is a variable so the listener creation can be unit-tested without
+-// binding privileged ports.
+-var netListen = func(network, address string) (net.Listener, error) {
+-	return net.Listen(network, address)
+-}
+-
+ func newIMAPServer(b backend.Backend, tlsConfig *tls.Config) *imapserver.Server {
+ 	s := imapserver.New(b)
+ 	s.TLSConfig = tlsConfig
+diff --git a/services/mailbox/server.go b/services/mailbox/server.go
+index 8452c6322d..ed9bca7a84 100644
+--- a/services/mailbox/server.go
++++ b/services/mailbox/server.go
+@@ -7,6 +7,7 @@ import (
+ 	"context"
+ 	"crypto/tls"
+ 	"fmt"
++	"net"
+ 
+ 	"gitea.dev/modules/setting"
+ )
+@@ -30,6 +31,12 @@ func loadTLSConfig() (*tls.Config, error) {
+ 
+ // Init starts the integrated SMTP and IMAP services. The listeners are only
+ // created when [mailbox] ENABLED is true.
++// netListen is a variable so listener creation can be unit-tested without
++// binding privileged ports.
++var netListen = func(network, address string) (net.Listener, error) {
++	return net.Listen(network, address)
++}
++
+ func Init(ctx context.Context) error {
+ 	if !setting.MailboxServer.Enabled {
+ 		return nil
+diff --git a/services/mailbox/smtp.go b/services/mailbox/smtp.go
+index cb6e39b52d..f7909875cd 100644
+--- a/services/mailbox/smtp.go
++++ b/services/mailbox/smtp.go
+@@ -4,16 +4,12 @@
+ package mailbox
+ 
+ import (
+-	"bufio"
+-	"bytes"
+ 	"context"
+ 	"crypto/tls"
+-	"encoding/base64"
+ 	"errors"
+ 	"fmt"
+ 	"io"
+ 	"net"
+-	"net/mail"
+ 	"strings"
+ 	"time"
+ 
+@@ -21,18 +17,19 @@ import (
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/log"
+ 	"gitea.dev/modules/setting"
++
++	"github.com/emersion/go-sasl"
++	"github.com/emersion/go-smtp"
+ )
+ 
+ const (
+-	smtpSessionTimeout = 10 * time.Minute
+-	// RFC 5321 caps commands at 512 and text lines at 1000 octets. Both limits are
+-	// raised here because real senders exceed them, while still bounding memory.
+-	maxCommandLineSize = 64 * 1024
+-	maxDataLineSize    = 1024 * 1024
++	smtpReadTimeout  = 10 * time.Minute
++	smtpWriteTimeout = 5 * time.Minute
++	// RFC 5321 caps text lines at 1000 octets. Real senders exceed it, so the
++	// limit is raised while still bounding what a single line can buffer.
++	smtpMaxLineLength = 1024 * 1024
+ )
+ 
+-var errLineTooLong = errors.New("SMTP line exceeds the maximum length")
+-
+ type smtpListenerConfig struct {
+ 	addr        string
+ 	requireAuth bool
+@@ -40,19 +37,19 @@ type smtpListenerConfig struct {
+ 	name        string
+ }
+ 
++// smtpBackend serves every listener. requireAuth marks the submission ports,
++// where a session must authenticate before it may set a return path.
++type smtpBackend struct {
++	ctx         context.Context
++	requireAuth bool
++}
++
+ type smtpSession struct {
+ 	ctx         context.Context
+-	conn        net.Conn
+-	rw          *bufio.ReadWriter
+-	tlsConfig   *tls.Config
++	conn        *smtp.Conn
+ 	requireAuth bool
+-	implicitTLS bool
+-	tlsActive   bool
+-	helo        bool
+-	heloName    string
+ 	user        *user_model.User
+ 	mailFrom    string
+-	mailSet     bool
+ 	recipients  []string
+ }
+ 
+@@ -76,454 +73,145 @@ func initSMTP(ctx context.Context, tlsConfig *tls.Config) error {
+ 			return fmt.Errorf("%s listener %s requires TLS_CERT_FILE and TLS_KEY_FILE", cfg.name, cfg.addr)
+ 		}
+ 
++		server := newSMTPServer(ctx, cfg, tlsConfig)
+ 		var (
+ 			ln  net.Listener
+ 			err error
+ 		)
+ 		if cfg.implicitTLS {
+-			ln, err = tls.Listen("tcp", cfg.addr, tlsConfig)
++			ln, err = tls.Listen("tcp", cfg.addr, tlsConfig.Clone())
+ 		} else {
+-			ln, err = net.Listen("tcp", cfg.addr)
++			ln, err = netListen("tcp", cfg.addr)
+ 		}
+ 		if err != nil {
+ 			return fmt.Errorf("listen on %s %s: %w", cfg.name, cfg.addr, err)
+ 		}
+ 		log.Info("Mailbox %s listening on %s", cfg.name, cfg.addr)
+-		go serveSMTPListener(ctx, ln, cfg, tlsConfig)
++		go serveSMTP(ctx, server, ln, cfg)
+ 	}
+ 	return nil
+ }
+ 
+-func serveSMTPListener(ctx context.Context, ln net.Listener, cfg smtpListenerConfig, tlsConfig *tls.Config) {
++func newSMTPServer(ctx context.Context, cfg smtpListenerConfig, tlsConfig *tls.Config) *smtp.Server {
++	server := smtp.NewServer(&smtpBackend{ctx: ctx, requireAuth: cfg.requireAuth})
++	server.Addr = cfg.addr
++	server.Domain = setting.MailboxServer.Hostname
++	server.MaxRecipients = setting.MailboxServer.MaxRecipients
++	server.MaxMessageBytes = setting.MailboxServer.MaxMessageSize
++	server.MaxLineLength = smtpMaxLineLength
++	server.ReadTimeout = smtpReadTimeout
++	server.WriteTimeout = smtpWriteTimeout
++	server.AllowInsecureAuth = setting.MailboxServer.AllowInsecureAuth
++	server.ErrorLog = smtpErrorLog{name: cfg.name}
++	// STARTTLS is only advertised on the cleartext listeners; the implicit-TLS
++	// listener is already wrapped by its own tls.Listener.
++	if !cfg.implicitTLS {
++		server.TLSConfig = tlsConfig
++	}
++	return server
++}
++
++func serveSMTP(ctx context.Context, server *smtp.Server, ln net.Listener, cfg smtpListenerConfig) {
+ 	go func() {
+ 		<-ctx.Done()
+-		_ = ln.Close()
++		_ = server.Close()
+ 	}()
+-	for {
+-		conn, err := ln.Accept()
+-		if err != nil {
+-			if ctx.Err() == nil {
+-				log.Error("Mailbox %s accept error: %v", cfg.name, err)
+-			}
+-			return
+-		}
+-		go (&smtpSession{
+-			ctx:         ctx,
+-			conn:        conn,
+-			tlsConfig:   tlsConfig,
+-			requireAuth: cfg.requireAuth,
+-			implicitTLS: cfg.implicitTLS,
+-			tlsActive:   cfg.implicitTLS,
+-		}).serve()
+-	}
+-}
+-
+-func (s *smtpSession) serve() {
+-	defer s.conn.Close()
+-	s.rw = bufio.NewReadWriter(bufio.NewReader(s.conn), bufio.NewWriter(s.conn))
+-	if err := s.reply(220, "%s ESMTP Gitea Mailbox", setting.MailboxServer.Hostname); err != nil {
+-		return
+-	}
+-	for {
+-		if err := s.conn.SetDeadline(time.Now().Add(smtpSessionTimeout)); err != nil {
+-			return
+-		}
+-		line, err := s.readCommandLine()
+-		if err != nil {
+-			if !errors.Is(err, io.EOF) {
+-				_ = s.reply(421, "4.4.2 Connection error")
+-			}
+-			return
+-		}
+-		verb, arg, _ := strings.Cut(strings.TrimSpace(line), " ")
+-		verb = strings.ToUpper(verb)
+-		switch verb {
+-		case "EHLO":
+-			if !s.setHelo(arg) {
+-				continue
+-			}
+-			s.resetTransaction()
+-			if err := s.ehlo(arg); err != nil {
+-				return
+-			}
+-		case "HELO":
+-			if !s.setHelo(arg) {
+-				continue
+-			}
+-			s.resetTransaction()
+-			if err := s.reply(250, "%s", setting.MailboxServer.Hostname); err != nil {
+-				return
+-			}
+-		case "NOOP":
+-			_ = s.reply(250, "2.0.0 OK")
+-		case "RSET":
+-			s.resetTransaction()
+-			_ = s.reply(250, "2.0.0 OK")
+-		case "QUIT":
+-			_ = s.reply(221, "2.0.0 Bye")
+-			return
+-		case "STARTTLS":
+-			if !s.startTLS() {
+-				return
+-			}
+-		case "AUTH":
+-			s.auth(arg)
+-		case "MAIL":
+-			s.mail(arg)
+-		case "RCPT":
+-			s.rcpt(arg)
+-		case "DATA":
+-			s.data()
+-		case "VRFY", "EXPN":
+-			_ = s.reply(252, "2.5.2 Cannot verify user")
+-		case "":
+-			_ = s.reply(500, "5.5.2 Empty command")
+-		default:
+-			_ = s.reply(502, "5.5.1 Command not implemented")
+-		}
++	if err := server.Serve(ln); err != nil && ctx.Err() == nil {
++		log.Error("Mailbox %s server stopped: %v", cfg.name, err)
+ 	}
+ }
+ 
+-func (s *smtpSession) readCommandLine() (string, error) {
+-	line, err := readLimitedLine(s.rw.Reader, maxCommandLineSize)
+-	return trimLineEnding(line), err
++// smtpErrorLog routes go-smtp's internal errors into the Gitea log.
++type smtpErrorLog struct {
++	name string
+ }
+ 
+-// readLimitedLine reads one LF-terminated line without buffering more than limit
+-// bytes, so a peer that never sends a newline cannot exhaust memory. ReadSlice
+-// caps each chunk at the bufio buffer size, which bounds growth between checks.
+-func readLimitedLine(r *bufio.Reader, limit int) (string, error) {
+-	var sb strings.Builder
+-	for {
+-		chunk, err := r.ReadSlice('\n')
+-		if sb.Len()+len(chunk) > limit {
+-			return "", errLineTooLong
+-		}
+-		sb.Write(chunk)
+-		if errors.Is(err, bufio.ErrBufferFull) {
+-			continue
+-		}
+-		return sb.String(), err
+-	}
++func (l smtpErrorLog) Printf(format string, v ...any) {
++	log.Warn("Mailbox %s: "+format, append([]any{l.name}, v...)...)
+ }
+ 
+-// trimLineEnding removes exactly one CRLF or LF terminator. TrimRight would also
+-// eat meaningful trailing CRs, which changes the bytes DKIM hashes.
+-func trimLineEnding(line string) string {
+-	line = strings.TrimSuffix(line, "\n")
+-	return strings.TrimSuffix(line, "\r")
++func (l smtpErrorLog) Println(v ...any) {
++	log.Warn("Mailbox %s: %s", l.name, fmt.Sprintln(v...))
+ }
+ 
+-func (s *smtpSession) reply(code int, format string, args ...any) error {
+-	if _, err := fmt.Fprintf(s.rw, "%d %s\r\n", code, fmt.Sprintf(format, args...)); err != nil {
+-		return err
+-	}
+-	return s.rw.Flush()
++func (b *smtpBackend) NewSession(c *smtp.Conn) (smtp.Session, error) {
++	return &smtpSession{ctx: b.ctx, conn: c, requireAuth: b.requireAuth}, nil
+ }
+ 
+-func (s *smtpSession) setHelo(arg string) bool {
+-	arg = strings.TrimSpace(arg)
+-	if arg == "" || strings.ContainsAny(arg, "\r\n \t") {
+-		_ = s.reply(501, "5.5.4 EHLO/HELO requires a single domain or address literal")
+-		return false
+-	}
+-	s.helo = true
+-	s.heloName = arg
+-	return true
++func (s *smtpSession) AuthMechanisms() []string {
++	return []string{sasl.Plain, sasl.Login}
+ }
+ 
+-func (s *smtpSession) ehlo(_ string) error {
+-	caps := []string{
+-		setting.MailboxServer.Hostname,
+-		"PIPELINING",
+-		"8BITMIME",
+-	}
+-	if setting.MailboxServer.MaxMessageSize > 0 {
+-		caps = append(caps, fmt.Sprintf("SIZE %d", setting.MailboxServer.MaxMessageSize))
+-	} else {
+-		caps = append(caps, "SIZE")
+-	}
+-	if s.tlsConfig != nil && !s.tlsActive && !s.implicitTLS {
+-		caps = append(caps, "STARTTLS")
+-	}
+-	if s.tlsActive || setting.MailboxServer.AllowInsecureAuth {
+-		caps = append(caps, "AUTH PLAIN LOGIN")
+-	}
+-	for i, cap := range caps {
+-		sep := "-"
+-		if i == len(caps)-1 {
+-			sep = " "
+-		}
+-		if _, err := fmt.Fprintf(s.rw, "250%s%s\r\n", sep, cap); err != nil {
+-			return err
++func (s *smtpSession) Auth(mech string) (sasl.Server, error) {
++	authenticate := func(username, password string) error {
++		user, err := Authenticate(s.ctx, username, password)
++		if err != nil {
++			log.Warn("Mailbox SMTP authentication failed for %q from %s: %v", username, s.remoteAddr(), err)
++			return smtp.ErrAuthFailed
+ 		}
++		s.user = user
++		return nil
+ 	}
+-	return s.rw.Flush()
+-}
+-
+-func (s *smtpSession) startTLS() bool {
+-	if s.tlsActive || s.implicitTLS {
+-		_ = s.reply(503, "5.5.1 TLS already active")
+-		return true
+-	}
+-	if s.tlsConfig == nil {
+-		_ = s.reply(454, "4.7.0 TLS not available")
+-		return true
+-	}
+-	if err := s.reply(220, "2.0.0 Ready to start TLS"); err != nil {
+-		return false
+-	}
+-	tlsConn := tls.Server(s.conn, s.tlsConfig.Clone())
+-	if err := tlsConn.HandshakeContext(s.ctx); err != nil {
+-		return false
+-	}
+-	s.conn = tlsConn
+-	s.rw = bufio.NewReadWriter(bufio.NewReader(tlsConn), bufio.NewWriter(tlsConn))
+-	s.tlsActive = true
+-	s.helo = false
+-	s.heloName = ""
+-	s.user = nil
+-	s.resetTransaction()
+-	return true
+-}
+-
+-func (s *smtpSession) auth(arg string) {
+-	if !s.helo {
+-		_ = s.reply(503, "5.5.1 EHLO/HELO first")
+-		return
+-	}
+-	if s.user != nil {
+-		_ = s.reply(503, "5.5.0 Already authenticated")
+-		return
+-	}
+-	if !s.tlsActive && !setting.MailboxServer.AllowInsecureAuth {
+-		_ = s.reply(538, "5.7.11 Encryption required for requested authentication mechanism")
+-		return
+-	}
+-	fields := strings.Fields(arg)
+-	if len(fields) == 0 {
+-		_ = s.reply(501, "5.5.4 Missing authentication mechanism")
+-		return
+-	}
+-	var username, password string
+-	var err error
+-	switch strings.ToUpper(fields[0]) {
+-	case "PLAIN":
+-		payload := ""
+-		if len(fields) > 1 {
+-			payload = fields[1]
+-		} else {
+-			if err := s.reply(334, ""); err != nil {
+-				return
+-			}
+-			payload, err = s.readCommandLine()
+-			if err != nil {
+-				return
+-			}
+-		}
+-		username, password, err = decodePlainAuth(payload)
+-	case "LOGIN":
+-		if len(fields) > 1 {
+-			username, err = decodeBase64String(fields[1])
+-		} else {
+-			if err = s.reply(334, "%s", base64.StdEncoding.EncodeToString([]byte("Username:"))); err != nil {
+-				return
+-			}
+-			var line string
+-			line, err = s.readCommandLine()
+-			if err == nil {
+-				username, err = decodeBase64String(line)
++	switch mech {
++	case sasl.Plain:
++		return sasl.NewPlainServer(func(identity, username, password string) error {
++			// An authorization identity that differs from the authentication
++			// identity would be impersonation.
++			if identity != "" && identity != username {
++				return smtp.ErrAuthFailed
+ 			}
+-		}
+-		if err == nil {
+-			if err = s.reply(334, "%s", base64.StdEncoding.EncodeToString([]byte("Password:"))); err != nil {
+-				return
+-			}
+-			var line string
+-			line, err = s.readCommandLine()
+-			if err == nil {
+-				password, err = decodeBase64String(line)
+-			}
+-		}
++			return authenticate(username, password)
++		}), nil
++	case sasl.Login:
++		return newLoginServer(authenticate), nil
+ 	default:
+-		_ = s.reply(504, "5.5.4 Unsupported authentication mechanism")
+-		return
+-	}
+-	if err != nil {
+-		_ = s.reply(501, "5.5.2 Invalid authentication payload")
+-		return
+-	}
+-	user, err := Authenticate(s.ctx, username, password)
+-	if err != nil {
+-		log.Warn("Mailbox SMTP authentication failed for %q from %s: %v", username, s.conn.RemoteAddr(), err)
+-		_ = s.reply(535, "5.7.8 Authentication credentials invalid")
+-		return
++		return nil, smtp.ErrAuthUnknownMechanism
+ 	}
+-	s.user = user
+-	_ = s.reply(235, "2.7.0 Authentication successful")
+ }
+ 
+-func decodePlainAuth(payload string) (string, string, error) {
+-	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(payload))
+-	if err != nil {
+-		return "", "", err
+-	}
+-	parts := bytes.Split(decoded, []byte{0})
+-	if len(parts) != 3 || len(parts[1]) == 0 {
+-		return "", "", errors.New("invalid AUTH PLAIN payload")
+-	}
+-	if len(parts[0]) != 0 && !bytes.Equal(parts[0], parts[1]) {
+-		return "", "", errors.New("authorization identity is not supported")
+-	}
+-	return string(parts[1]), string(parts[2]), nil
+-}
+-
+-func decodeBase64String(v string) (string, error) {
+-	b, err := base64.StdEncoding.DecodeString(strings.TrimSpace(v))
+-	return string(b), err
+-}
+-
+-func (s *smtpSession) mail(arg string) {
+-	if !s.helo {
+-		_ = s.reply(503, "5.5.1 EHLO/HELO first")
+-		return
+-	}
++func (s *smtpSession) Mail(from string, _ *smtp.MailOptions) error {
+ 	if s.requireAuth && s.user == nil {
+-		_ = s.reply(530, "5.7.0 Authentication required")
+-		return
++		return smtp.ErrAuthRequired
+ 	}
+-	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(arg)), "FROM:") {
+-		_ = s.reply(501, "5.5.4 MAIL requires FROM")
+-		return
++	if s.user != nil && from != "" && !SenderAllowed(s.ctx, s.user, from) {
++		return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Sender address not owned by authenticated user"}
+ 	}
+-	path, err := parseSMTPPath(strings.TrimSpace(arg[len("FROM:"):]), true)
+-	if err != nil {
+-		_ = s.reply(501, "5.1.7 Bad sender address syntax")
+-		return
+-	}
+-	if s.user != nil && path != "" && !SenderAllowed(s.ctx, s.user, path) {
+-		_ = s.reply(553, "5.7.1 Sender address not owned by authenticated user")
+-		return
+-	}
+-	s.mailFrom = path
+-	s.mailSet = true
++	s.mailFrom = from
+ 	s.recipients = nil
+-	_ = s.reply(250, "2.1.0 Sender OK")
++	return nil
+ }
+ 
+-func (s *smtpSession) rcpt(arg string) {
+-	if !s.mailSet {
+-		_ = s.reply(503, "5.5.1 Need MAIL FROM before RCPT TO")
+-		return
+-	}
+-	if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(arg)), "TO:") {
+-		_ = s.reply(501, "5.5.4 RCPT requires TO")
+-		return
+-	}
+-	if len(s.recipients) >= setting.MailboxServer.MaxRecipients {
+-		_ = s.reply(452, "4.5.3 Too many recipients")
+-		return
+-	}
+-	path, err := parseSMTPPath(strings.TrimSpace(arg[len("TO:"):]), false)
+-	if err != nil || path == "" {
+-		_ = s.reply(501, "5.1.3 Bad recipient address syntax")
+-		return
+-	}
++func (s *smtpSession) Rcpt(to string, _ *smtp.RcptOptions) error {
+ 	allowRelay := s.user != nil && setting.MailboxServer.RelayEnabled
+-	if err := CanAcceptRecipient(s.ctx, path, allowRelay); err != nil {
+-		_ = s.reply(550, "5.1.1 Recipient rejected")
+-		return
++	if err := CanAcceptRecipient(s.ctx, to, allowRelay); err != nil {
++		return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 1, 1}, Message: "Recipient rejected"}
+ 	}
+-	s.recipients = append(s.recipients, path)
+-	_ = s.reply(250, "2.1.5 Recipient OK")
+-}
+-
+-func parseSMTPPath(v string, allowEmpty bool) (string, error) {
+-	v = strings.TrimSpace(v)
+-	if !strings.HasPrefix(v, "<") {
+-		return "", errors.New("SMTP path must start with <")
+-	}
+-	end := strings.IndexByte(v, '>')
+-	if end < 0 {
+-		return "", errors.New("SMTP path must end with >")
+-	}
+-	path := v[1:end]
+-	params := strings.TrimSpace(v[end+1:])
+-	if strings.ContainsAny(params, "\r\n") {
+-		return "", errors.New("invalid ESMTP parameters")
+-	}
+-	if path == "" && allowEmpty {
+-		return "", nil
+-	}
+-	if path == "" {
+-		return "", errors.New("empty SMTP path")
+-	}
+-	parsed, err := mail.ParseAddress(path)
+-	if err != nil || !strings.EqualFold(parsed.Address, path) {
+-		if err == nil {
+-			err = errors.New("SMTP path must contain only an addr-spec")
+-		}
+-		return "", err
+-	}
+-	return parsed.Address, nil
++	s.recipients = append(s.recipients, to)
++	return nil
+ }
+ 
+-func (s *smtpSession) data() {
++func (s *smtpSession) Data(r io.Reader) error {
+ 	if len(s.recipients) == 0 {
+-		_ = s.reply(503, "5.5.1 Need RCPT TO before DATA")
+-		return
+-	}
+-	if err := s.reply(354, "End data with <CR><LF>.<CR><LF>"); err != nil {
+-		return
+-	}
+-	var buf bytes.Buffer
+-	tooLarge := false
+-	for {
+-		if err := s.conn.SetDeadline(time.Now().Add(smtpSessionTimeout)); err != nil {
+-			return
+-		}
+-		line, err := readLimitedLine(s.rw.Reader, maxDataLineSize)
+-		if err != nil {
+-			if errors.Is(err, errLineTooLong) {
+-				_ = s.reply(500, "5.5.2 Line too long")
+-			}
+-			return
+-		}
+-		trimmed := trimLineEnding(line)
+-		if trimmed == "." {
+-			break
+-		}
+-		// RFC 5321 4.5.2: a leading dot on any content line is transparency padding.
+-		trimmed = strings.TrimPrefix(trimmed, ".")
+-		if !tooLarge {
+-			buf.WriteString(trimmed)
+-			buf.WriteString("\r\n")
+-			if setting.MailboxServer.MaxMessageSize > 0 && int64(buf.Len()) > setting.MailboxServer.MaxMessageSize {
+-				tooLarge = true
+-			}
+-		}
++		return &smtp.SMTPError{Code: 503, EnhancedCode: smtp.EnhancedCode{5, 5, 1}, Message: "Need RCPT TO before DATA"}
+ 	}
+-	if tooLarge {
+-		_ = s.reply(552, "5.3.4 Message size exceeds fixed maximum message size")
+-		s.resetTransaction()
+-		return
++	raw, err := io.ReadAll(r)
++	if err != nil {
++		// go-smtp reports the size overrun itself; anything else is a read failure.
++		return err
+ 	}
+-	allowRelay := s.user != nil && setting.MailboxServer.RelayEnabled
+-	raw := buf.Bytes()
+-	deliveryOptions := DeliveryOptions{AllowRelay: allowRelay}
++
++	remote := remoteIP(s.remoteAddr())
++	_, tlsActive := s.conn.TLSConnectionState()
++	deliveryOptions := DeliveryOptions{AllowRelay: s.user != nil && setting.MailboxServer.RelayEnabled}
+ 
+ 	if s.user == nil {
+-		auth := authenticateIncoming(s.ctx, remoteIP(s.conn.RemoteAddr()), s.heloName, s.mailFrom, raw)
+-		logInboundAuthentication(auth.Action, remoteIP(s.conn.RemoteAddr()), s.mailFrom)
++		auth := authenticateIncoming(s.ctx, remote, s.conn.Hostname(), s.mailFrom, raw)
++		logInboundAuthentication(auth.Action, remote, s.mailFrom)
+ 		switch auth.Action {
+ 		case inboundAuthDefer:
+-			_ = s.reply(451, "4.7.5 Message authentication temporarily unavailable")
+-			s.resetTransaction()
+-			return
++			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 7, 5}, Message: "Message authentication temporarily unavailable"}
+ 		case inboundAuthReject:
+-			_ = s.reply(550, "5.7.1 Message rejected by DMARC policy")
+-			s.resetTransaction()
+-			return
++			return &smtp.SMTPError{Code: 550, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "Message rejected by DMARC policy"}
+ 		case inboundAuthQuarantine:
+ 			deliveryOptions.SkipHandlers = true
+ 			if setting.MailboxServer.DMARCQuarantineJunk {
+@@ -531,37 +219,71 @@ func (s *smtpSession) data() {
+ 			}
+ 		}
+ 		raw = prependMessageHeader(raw, auth.Header)
+-		raw = addReceivedHeader(raw, s.conn.RemoteAddr(), s.tlsActive)
++		raw = addReceivedHeader(raw, s.remoteAddr(), tlsActive)
+ 	} else {
+ 		if err := validateMessageFrom(s.ctx, s.user, raw); err != nil {
+ 			log.Warn("Mailbox SMTP rejected unauthorized RFC5322.From for user %d: %v", s.user.ID, err)
+-			_ = s.reply(553, "5.7.1 RFC5322.From address is not owned by authenticated user")
+-			s.resetTransaction()
+-			return
++			return &smtp.SMTPError{Code: 553, EnhancedCode: smtp.EnhancedCode{5, 7, 1}, Message: "RFC5322.From address is not owned by authenticated user"}
+ 		}
+-		raw = addReceivedHeader(raw, s.conn.RemoteAddr(), s.tlsActive)
+-		var err error
+-		raw, err = SignOutboundDKIM(raw)
+-		if err != nil {
++		raw = addReceivedHeader(raw, s.remoteAddr(), tlsActive)
++		if raw, err = SignOutboundDKIM(raw); err != nil {
+ 			log.Error("Mailbox SMTP DKIM signing failed for authenticated user %d: %v", s.user.ID, err)
+-			_ = s.reply(451, "4.7.0 Temporary message signing failure")
+-			s.resetTransaction()
+-			return
++			return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 7, 0}, Message: "Temporary message signing failure"}
+ 		}
+ 	}
+ 
+ 	if _, err := DeliverRawWithOptions(s.ctx, s.mailFrom, s.recipients, raw, deliveryOptions); err != nil {
+ 		log.Error("Mailbox SMTP delivery failed from %q to %v: %v", s.mailFrom, s.recipients, err)
+ 		if errors.Is(err, ErrQuotaExceeded) {
+-			_ = s.reply(552, "5.2.2 Mailbox quota exceeded")
+-		} else {
+-			_ = s.reply(451, "4.3.0 Temporary delivery failure")
++			return &smtp.SMTPError{Code: 552, EnhancedCode: smtp.EnhancedCode{5, 2, 2}, Message: "Mailbox quota exceeded"}
+ 		}
+-		s.resetTransaction()
+-		return
++		return &smtp.SMTPError{Code: 451, EnhancedCode: smtp.EnhancedCode{4, 3, 0}, Message: "Temporary delivery failure"}
++	}
++	return nil
++}
++
++func (s *smtpSession) Reset() {
++	s.mailFrom = ""
++	s.recipients = nil
++}
++
++func (s *smtpSession) Logout() error {
++	s.Reset()
++	s.user = nil
++	return nil
++}
++
++func (s *smtpSession) remoteAddr() net.Addr {
++	if s.conn == nil || s.conn.Conn() == nil {
++		return nil
+ 	}
+-	_ = s.reply(250, "2.0.0 Message accepted for delivery")
+-	s.resetTransaction()
++	return s.conn.Conn().RemoteAddr()
++}
++
++// loginServer implements the non-standard but widely deployed AUTH LOGIN
++// exchange, which go-sasl only provides a client for.
++type loginServer struct {
++	authenticate func(username, password string) error
++	username     string
++	hasUsername  bool
++}
++
++func newLoginServer(authenticate func(username, password string) error) sasl.Server {
++	return &loginServer{authenticate: authenticate}
++}
++
++func (s *loginServer) Next(response []byte) ([]byte, bool, error) {
++	if response == nil {
++		return []byte("Username:"), false, nil
++	}
++	if !s.hasUsername {
++		s.username, s.hasUsername = string(response), true
++		return []byte("Password:"), false, nil
++	}
++	if err := s.authenticate(s.username, string(response)); err != nil {
++		return nil, false, err
++	}
++	return nil, true, nil
+ }
+ 
+ func remoteIP(remote net.Addr) net.IP {
+@@ -596,9 +318,3 @@ func addReceivedHeader(raw []byte, remote net.Addr, tlsActive bool) []byte {
+ 	out = append(out, raw...)
+ 	return out
+ }
+-
+-func (s *smtpSession) resetTransaction() {
+-	s.mailFrom = ""
+-	s.mailSet = false
+-	s.recipients = nil
+-}
+diff --git a/services/mailbox/smtp_test.go b/services/mailbox/smtp_test.go
+index 3dea951088..eb3982326c 100644
+--- a/services/mailbox/smtp_test.go
++++ b/services/mailbox/smtp_test.go
+@@ -4,119 +4,143 @@
+ package mailbox
+ 
+ import (
+-	"bufio"
++	"context"
+ 	"errors"
+-	"io"
++	"net"
+ 	"strings"
+ 	"testing"
+ 
++	user_model "gitea.dev/models/user"
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/test"
++
++	"github.com/emersion/go-sasl"
++	"github.com/emersion/go-smtp"
+ 	"github.com/stretchr/testify/assert"
+ 	"github.com/stretchr/testify/require"
+ )
+ 
+-func TestParseSMTPPath(t *testing.T) {
+-	cases := []struct {
+-		in         string
+-		allowEmpty bool
+-		want       string
+-		wantErr    bool
+-	}{
+-		{in: "<user@example.com>", want: "user@example.com"},
+-		{in: "<user@example.com> SIZE=1234", want: "user@example.com"},
+-		{in: "<>", allowEmpty: true, want: ""},
+-		{in: "<>", wantErr: true},
+-		{in: "user@example.com", wantErr: true},
+-		{in: "<user@example.com", wantErr: true},
+-		// A display name is not an addr-spec and must be refused.
+-		{in: "<Bob <bob@example.com>>", wantErr: true},
+-		// A CR inside the path would let a peer inject a second command.
+-		{in: "<user\r\nDATA@example.com>", wantErr: true},
+-		// Trailing ESMTP parameters are discarded, so they cannot inject anything.
+-		{in: "<user@example.com>\r\nDATA", want: "user@example.com"},
+-	}
+-	for _, c := range cases {
+-		got, err := parseSMTPPath(c.in, c.allowEmpty)
+-		if c.wantErr {
+-			assert.Error(t, err, c.in)
+-			continue
+-		}
+-		require.NoError(t, err, c.in)
+-		assert.Equal(t, c.want, got, c.in)
+-	}
+-}
++func TestLoginServerExchange(t *testing.T) {
++	var gotUser, gotPass string
++	server := newLoginServer(func(username, password string) error {
++		gotUser, gotPass = username, password
++		return nil
++	})
+ 
+-func TestTrimLineEnding(t *testing.T) {
+-	assert.Equal(t, "text", trimLineEnding("text\r\n"))
+-	assert.Equal(t, "text", trimLineEnding("text\n"))
+-	// Only one terminator is removed: extra CRs are body bytes that DKIM hashes.
+-	assert.Equal(t, "text\r", trimLineEnding("text\r\r\n"))
+-	assert.Equal(t, "text", trimLineEnding("text"))
+-}
++	// AUTH LOGIN with no initial response prompts for each field in turn.
++	challenge, done, err := server.Next(nil)
++	require.NoError(t, err)
++	assert.False(t, done)
++	assert.Equal(t, "Username:", string(challenge))
+ 
+-func TestReadLimitedLine(t *testing.T) {
+-	r := bufio.NewReader(strings.NewReader("first\r\nsecond\r\n"))
+-	line, err := readLimitedLine(r, 1024)
++	challenge, done, err = server.Next([]byte("alice"))
+ 	require.NoError(t, err)
+-	assert.Equal(t, "first\r\n", line)
++	assert.False(t, done)
++	assert.Equal(t, "Password:", string(challenge))
+ 
+-	line, err = readLimitedLine(r, 1024)
++	_, done, err = server.Next([]byte("secret"))
+ 	require.NoError(t, err)
+-	assert.Equal(t, "second\r\n", line)
++	assert.True(t, done)
++	assert.Equal(t, "alice", gotUser)
++	assert.Equal(t, "secret", gotPass)
++}
+ 
+-	_, err = readLimitedLine(r, 1024)
+-	assert.ErrorIs(t, err, io.EOF)
++func TestLoginServerRejectsBadCredentials(t *testing.T) {
++	server := newLoginServer(func(string, string) error { return smtp.ErrAuthFailed })
++	_, _, err := server.Next(nil)
++	require.NoError(t, err)
++	_, _, err = server.Next([]byte("alice"))
++	require.NoError(t, err)
++	_, done, err := server.Next([]byte("wrong"))
++	assert.Error(t, err)
++	assert.False(t, done)
+ }
+ 
+-func TestReadLimitedLineRefusesOverlongLine(t *testing.T) {
+-	// A peer that never sends a newline must not be able to grow the buffer.
+-	_, err := readLimitedLine(bufio.NewReader(strings.NewReader(strings.Repeat("x", 200_000))), 1024)
+-	assert.ErrorIs(t, err, errLineTooLong)
++func TestRemoteIP(t *testing.T) {
++	assert.Equal(t, "192.0.2.1", remoteIP(&net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 25}).String())
++	assert.Nil(t, remoteIP(nil))
+ }
+ 
+-func TestDecodePlainAuth(t *testing.T) {
+-	username, password, err := decodePlainAuth("AHVzZXIAcGFzcw==") // \0user\0pass
+-	require.NoError(t, err)
+-	assert.Equal(t, "user", username)
+-	assert.Equal(t, "pass", password)
++func TestAddReceivedHeader(t *testing.T) {
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.Hostname, "mail.example.com"))
++	raw := []byte("Subject: hi\r\n\r\nbody\r\n")
+ 
+-	// An authorization identity different from the authentication identity is
+-	// impersonation and must be refused.
+-	_, _, err = decodePlainAuth("b3RoZXIAdXNlcgBwYXNz") // other\0user\0pass
+-	assert.Error(t, err)
++	header := string(addReceivedHeader(raw, &net.TCPAddr{IP: net.ParseIP("192.0.2.1"), Port: 40000}, false))
++	assert.True(t, strings.HasPrefix(header, "Received: from [192.0.2.1] by mail.example.com with ESMTP;"))
++	assert.True(t, strings.HasSuffix(header, string(raw)), "the message must be preserved verbatim")
+ 
+-	_, _, err = decodePlainAuth("bm90LWJhc2U2NC1zdHJ1Y3R1cmU=")
+-	assert.Error(t, err)
++	// A TLS session is recorded as ESMTPS.
++	assert.Contains(t, string(addReceivedHeader(raw, nil, true)), "with ESMTPS;")
++	assert.Contains(t, string(addReceivedHeader(raw, nil, false)), "from [unknown]")
+ }
+ 
+-// unstuffDataLines mirrors the DATA reader so the transparency rules can be
+-// checked without a live connection.
+-func unstuffDataLines(t *testing.T, data string) string {
++// startTestSMTP runs a real go-smtp server on a loopback port and returns its address.
++func startTestSMTP(t *testing.T, requireAuth bool) string {
+ 	t.Helper()
+-	r := bufio.NewReader(strings.NewReader(data))
+-	var out strings.Builder
+-	for {
+-		line, err := readLimitedLine(r, maxDataLineSize)
+-		if err != nil && !errors.Is(err, io.EOF) {
+-			t.Fatal(err)
+-		}
+-		trimmed := trimLineEnding(line)
+-		if trimmed == "." {
+-			break
+-		}
+-		trimmed = strings.TrimPrefix(trimmed, ".")
+-		out.WriteString(trimmed)
+-		out.WriteString("\r\n")
+-		if errors.Is(err, io.EOF) {
+-			break
+-		}
+-	}
+-	return out.String()
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.Hostname, "mail.example.com"))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.AllowInsecureAuth, true))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.MaxRecipients, 100))
++
++	ln, err := net.Listen("tcp", "127.0.0.1:0")
++	require.NoError(t, err)
++
++	ctx, cancel := context.WithCancel(t.Context())
++	cfg := smtpListenerConfig{addr: ln.Addr().String(), requireAuth: requireAuth, name: "SMTP test"}
++	server := newSMTPServer(ctx, cfg, nil)
++	go func() { _ = server.Serve(ln) }()
++	t.Cleanup(func() {
++		cancel()
++		_ = server.Close()
++	})
++	return ln.Addr().String()
+ }
+ 
+-func TestDataTransparency(t *testing.T) {
+-	// RFC 5321 4.5.2: one leading dot is stripped from every content line.
+-	assert.Equal(t, "body\r\n.stuffed\r\n", unstuffDataLines(t, "body\r\n..stuffed\r\n.\r\n"))
+-	assert.Equal(t, "leading\r\n", unstuffDataLines(t, ".leading\r\n.\r\n"))
+-	// A bare LF from a lax sender is normalized to CRLF before signing.
+-	assert.Equal(t, "a\r\nb\r\n", unstuffDataLines(t, "a\nb\n.\r\n"))
++func TestSMTPSubmissionRequiresAuth(t *testing.T) {
++	addr := startTestSMTP(t, true)
++
++	client, err := smtp.Dial(addr)
++	require.NoError(t, err)
++	defer client.Close()
++	require.NoError(t, client.Hello("client.example.net"))
++
++	// A submission listener must refuse a return path before authentication.
++	err = client.Mail("alice@example.com", nil)
++	require.Error(t, err)
++	var smtpErr *smtp.SMTPError
++	require.ErrorAs(t, err, &smtpErr)
++	assert.Equal(t, 502, smtpErr.Code)
++}
++
++func TestSMTPAuthRejectsInvalidCredentials(t *testing.T) {
++	t.Cleanup(test.MockVariableValue(&signInFunc, func(context.Context, string, string) (*user_model.User, error) {
++		return nil, errors.New("invalid credentials")
++	}))
++	addr := startTestSMTP(t, true)
++
++	client, err := smtp.Dial(addr)
++	require.NoError(t, err)
++	defer client.Close()
++	require.NoError(t, client.Hello("client.example.net"))
++
++	// Both mechanisms our sessions advertise must reject a bad password.
++	assert.Error(t, client.Auth(sasl.NewPlainClient("", "alice", "wrong")))
++	assert.Error(t, client.Auth(sasl.NewLoginClient("alice", "wrong")))
++}
++
++func TestSMTPAdvertisesConfiguredLimits(t *testing.T) {
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.MaxMessageSize, int64(1234)))
++	addr := startTestSMTP(t, false)
++
++	client, err := smtp.Dial(addr)
++	require.NoError(t, err)
++	defer client.Close()
++	require.NoError(t, client.Hello("client.example.net"))
++
++	// SIZE is what tells a sender to give up before transferring a huge message.
++	ok, size := client.Extension("SIZE")
++	assert.True(t, ok)
++	assert.Equal(t, "1234", size)
++
++	hasAuth, _ := client.Extension("AUTH")
++	assert.True(t, hasAuth, "AUTH is advertised once insecure auth is permitted")
+ }
+-- 
+2.55.0
+

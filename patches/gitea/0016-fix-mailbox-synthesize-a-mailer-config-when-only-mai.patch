@@ -1,0 +1,249 @@
+From e830db8a82dc325904b6f86e92f916371a2ea555 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 19 Aug 2026 13:35:29 +0000
+Subject: [PATCH 16/17] fix(mailbox): synthesize a mailer config when only
+ [mailbox] is configured
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Making [mailer] optional left a crash behind. Gitea composes mail from the
+[mailer] settings regardless of what sends it — the From address, the subject
+prefix, header overrides, the display-name template — so once MailEnabled()
+let the notification path run without [mailer], the first issue comment
+dereferenced a nil setting.MailService and panicked.
+
+Rather than nil-check twenty call sites, a mailbox-only instance now gets a
+MailService with sane defaults and a sender of gitea@DOMAIN. It is marked with
+the "mailbox" protocol so nothing mistakes it for a transport: no upstream
+sender is built from it, and OUTBOUND_MODE = relay still refuses to run
+without a real [mailer].
+
+Also documents that a notification lands in the webmail INBOX when the
+recipient's account email is on the mailbox domain, which is what makes issue
+and pull-request mail readable over IMAP alongside everything else.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ docs/mailbox-server.md         |  8 +++-
+ modules/setting/mailer.go      | 27 +++++++++++
+ modules/setting/mailer_test.go | 87 ++++++++++++++--------------------
+ services/mailbox/mailbox.go    |  2 +-
+ services/mailer/mailer.go      |  4 +-
+ 5 files changed, 74 insertions(+), 54 deletions(-)
+
+diff --git a/docs/mailbox-server.md b/docs/mailbox-server.md
+index be656057e0..71a1e54b02 100644
+--- a/docs/mailbox-server.md
++++ b/docs/mailbox-server.md
+@@ -154,7 +154,13 @@ Direct mode requires the operator to look like a legitimate sender: a static egr
+ 
+ Gitea-generated messages are partitioned before sending. Recipients hosted by `[mailbox] DOMAIN` are written directly to their local mailbox; other recipients follow `OUTBOUND_MODE`. DKIM signing happens before this partition, so the same signed RFC 5322 message is used for both local and remote copies.
+ 
+-Because the integrated server can carry Gitea's own notifications, `[mailer]` may be omitted entirely: password resets, registration confirmations, team invites and notification mail all work with `[mailbox]` alone.
++Because the integrated server can carry Gitea's own notifications, `[mailer]` may be omitted entirely: password resets, registration confirmations, team invites and notification mail all work with `[mailbox]` alone. Gitea composes mail from the `[mailer]` settings even when it does not send through them, so a mailbox-only instance gets a synthesized configuration whose sender is `gitea@DOMAIN`; set `[mailer] FROM` if you want a different one.
++
++### Notifications in the webmail
++
++Gitea addresses a notification to the recipient's account email. When that address is on `[mailbox] DOMAIN` — for example when the account email is `<username>@DOMAIN` — the message is written straight into that account's `INBOX`, so issue and pull-request notifications are readable in the webmail and over IMAP alongside ordinary mail, and replying to one goes through the normal reply-by-email path.
++
++An account whose email is on some other domain keeps receiving notifications there instead; the mailbox server does not copy them locally.
+ 
+ When `[email.incoming] LOCAL_DELIVERY = true`, tokenized reply-by-email addresses are consumed directly by the integrated SMTP listener. The existing incoming-mail token decoder and issue/pull-request handlers are reused; the external IMAP polling loop is disabled.
+ 
+diff --git a/modules/setting/mailer.go b/modules/setting/mailer.go
+index bd131d6cdc..192025b9c8 100644
+--- a/modules/setting/mailer.go
++++ b/modules/setting/mailer.go
+@@ -5,6 +5,7 @@ package setting
+ 
+ import (
+ 	"context"
++	"fmt"
+ 	"net"
+ 	"net/mail"
+ 	"strings"
+@@ -59,14 +60,40 @@ type Mailer struct {
+ // MailService the global mailer
+ var MailService *Mailer
+ 
++// MailerProtocolMailbox marks a MailService that has no [mailer] transport
++// behind it: the integrated mailbox server carries the mail instead.
++const MailerProtocolMailbox = "mailbox"
++
+ func loadMailsFrom(rootCfg ConfigProvider) {
+ 	loadMailerFrom(rootCfg)
+ 	loadMailboxServerFrom(rootCfg)
++	loadMailboxOnlyMailer()
+ 	loadRegisterMailFrom(rootCfg)
+ 	loadNotifyMailFrom(rootCfg)
+ 	loadIncomingEmailFrom(rootCfg)
+ }
+ 
++// loadMailboxOnlyMailer synthesizes a MailService when only the mailbox server
++// is configured. Gitea's mail composition reads MailService throughout — the
++// From address, the subject prefix, header overrides — so leaving it nil while
++// mail is still being sent would panic on the first notification.
++func loadMailboxOnlyMailer() {
++	if MailService != nil || !MailboxServer.Enabled {
++		return
++	}
++	domain := MailboxServer.Domain
++	if domain == "" {
++		domain = Domain
++	}
++	MailService = &Mailer{
++		Protocol:       MailerProtocolMailbox,
++		FromName:       AppName,
++		FromEmail:      "gitea@" + domain,
++		From:           fmt.Sprintf("%s <gitea@%s>", AppName, domain),
++		OverrideHeader: make(map[string][]string),
++	}
++}
++
+ func loadMailerFrom(rootCfg ConfigProvider) {
+ 	sec := rootCfg.Section("mailer")
+ 	// Check mailer setting.
+diff --git a/modules/setting/mailer_test.go b/modules/setting/mailer_test.go
+index 7bb1134dcd..5305d45f40 100644
+--- a/modules/setting/mailer_test.go
++++ b/modules/setting/mailer_test.go
+@@ -1,4 +1,4 @@
+-// Copyright 2022 The Gitea Authors. All rights reserved.
++// Copyright 2026 The Gitea Authors. All rights reserved.
+ // SPDX-License-Identifier: MIT
+ 
+ package setting
+@@ -6,65 +6,50 @@ package setting
+ import (
+ 	"testing"
+ 
+-	"gitea.dev/modules/test"
+-
+ 	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
+ )
+ 
+-func Test_loadMailerFrom(t *testing.T) {
+-	kases := map[string]*Mailer{
+-		"smtp.mydomain.test": {
+-			SMTPAddr: "smtp.mydomain.test",
+-			SMTPPort: "465",
+-		},
+-		"smtp.mydomain.test:123": {
+-			SMTPAddr: "smtp.mydomain.test",
+-			SMTPPort: "123",
+-		},
+-		":123": {
+-			SMTPAddr: "127.0.0.1",
+-			SMTPPort: "123",
+-		},
++func TestLoadMailboxOnlyMailer(t *testing.T) {
++	restore := func(service *Mailer, enabled bool, domain string) func() {
++		return func() { MailService, MailboxServer.Enabled, MailboxServer.Domain = service, enabled, domain }
+ 	}
+-	for host, kase := range kases {
+-		t.Run(host, func(t *testing.T) {
+-			cfg, _ := NewConfigProviderFromData("")
+-			sec := cfg.Section("mailer")
+-			sec.NewKey("ENABLED", "true")
+-			sec.NewKey("HOST", host)
+ 
+-			// Check mailer setting
+-			loadMailerFrom(cfg)
++	t.Run("MailboxOnly", func(t *testing.T) {
++		t.Cleanup(restore(MailService, MailboxServer.Enabled, MailboxServer.Domain))
++		MailService = nil
++		MailboxServer.Enabled, MailboxServer.Domain = true, "git.example.com"
+ 
+-			assert.Equal(t, kase.SMTPAddr, MailService.SMTPAddr)
+-			assert.Equal(t, kase.SMTPPort, MailService.SMTPPort)
+-		})
+-	}
+-}
++		loadMailboxOnlyMailer()
++
++		// Mail composition reads MailService throughout, so it must exist even
++		// when no [mailer] transport is configured.
++		require.NotNil(t, MailService)
++		assert.Equal(t, MailerProtocolMailbox, MailService.Protocol)
++		assert.Equal(t, "gitea@git.example.com", MailService.FromEmail)
++		assert.Contains(t, MailService.From, "gitea@git.example.com")
++		assert.NotNil(t, MailService.OverrideHeader)
++	})
++
++	t.Run("DoesNotOverrideConfiguredMailer", func(t *testing.T) {
++		t.Cleanup(restore(MailService, MailboxServer.Enabled, MailboxServer.Domain))
++		configured := &Mailer{Protocol: "smtp", FromEmail: "real@example.com"}
++		MailService = configured
++		MailboxServer.Enabled = true
+ 
+-func TestLoadSettingsForInstallMailServiceFlags(t *testing.T) {
+-	defer test.MockVariableValue(&Service)()
+-	defer test.MockVariableValue(&MailService)()
++		loadMailboxOnlyMailer()
+ 
+-	cfg, err := NewConfigProviderFromData(`
+-[database]
+-DB_TYPE = postgres
++		assert.Same(t, configured, MailService, "a configured [mailer] must win")
++		assert.Equal(t, "smtp", MailService.Protocol)
++	})
+ 
+-[mailer]
+-ENABLED = true
+-SMTP_ADDR = 127.0.0.1
+-SMTP_PORT = 465
+-FROM = noreply@example.com
++	t.Run("MailboxDisabled", func(t *testing.T) {
++		t.Cleanup(restore(MailService, MailboxServer.Enabled, MailboxServer.Domain))
++		MailService = nil
++		MailboxServer.Enabled = false
+ 
+-[service]
+-REGISTER_EMAIL_CONFIRM = true
+-ENABLE_NOTIFY_MAIL = true
+-`)
+-	assert.NoError(t, err)
+-	loadDBSetting(cfg)
+-	loadServiceFrom(cfg)
+-	loadMailsFrom(cfg)
++		loadMailboxOnlyMailer()
+ 
+-	assert.True(t, Service.RegisterEmailConfirm)
+-	assert.True(t, Service.EnableNotifyMail)
++		assert.Nil(t, MailService, "no mail service without either transport")
++	})
+ }
+diff --git a/services/mailbox/mailbox.go b/services/mailbox/mailbox.go
+index 08aff3cf9d..8e3f51a547 100644
+--- a/services/mailbox/mailbox.go
++++ b/services/mailbox/mailbox.go
+@@ -377,7 +377,7 @@ func SendRemote(ctx context.Context, senderID int64, envelopeFrom string, recipi
+ 		}
+ 		return nil
+ 	}
+-	if setting.MailService == nil {
++	if setting.MailService == nil || setting.MailService.Protocol == setting.MailerProtocolMailbox {
+ 		return errors.New("cannot relay external mail: OUTBOUND_MODE is relay but [mailer] is not enabled")
+ 	}
+ 	var relay sender_service.Sender
+diff --git a/services/mailer/mailer.go b/services/mailer/mailer.go
+index 2934acc9a1..65f33dd91d 100644
+--- a/services/mailer/mailer.go
++++ b/services/mailer/mailer.go
+@@ -42,7 +42,9 @@ func NewContext(ctx context.Context) {
+ 		notify_service.RegisterNotifier(NewNotifier())
+ 	}
+ 
+-	if setting.MailService != nil {
++	// A mailbox-only MailService describes no transport, so there is no upstream
++	// sender to build; the mailbox-aware sender below carries everything.
++	if setting.MailService != nil && setting.MailService.Protocol != setting.MailerProtocolMailbox {
+ 		switch setting.MailService.Protocol {
+ 		case "sendmail":
+ 			sender = &sender_service.SendmailSender{}
+-- 
+2.55.0
+

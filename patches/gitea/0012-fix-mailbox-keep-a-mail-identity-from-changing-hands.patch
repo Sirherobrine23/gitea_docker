@@ -1,0 +1,695 @@
+From 60a69ec5ae6d25adf4221ce3cd896c384eaba1fd Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 19 Aug 2026 01:56:58 +0000
+Subject: [PATCH 12/17] fix(mailbox): keep a mail identity from changing hands
+ on username reuse
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+Addresses were derived from the current username, and the alias table was
+writable by any user. Both let a mail identity move between accounts.
+
+A renamed account released its address: Gitea frees the old username and lets
+the next account register it, so mail to the old address — password resets and
+confirmations sent by third parties — was delivered to whoever claimed the name
+next. Renaming now retains the old local-part as a "retired" assignment bound to
+the original account, so it keeps reaching its original owner and an account
+that later registers that username does not inherit it. AddressForUser reports
+no address for such an account rather than claiming one it will not receive mail
+at. Stored messages were always keyed by account, so nothing already delivered
+was ever affected.
+
+Address assignment moves from the user to administrators, at /-/admin/mailbox.
+A user could previously claim any free local-part for themselves, which is the
+same identity-transfer problem from the other direction; the mail settings page
+now only reports which addresses reach the account. The new page lists every
+assignment with its owner and origin, marking the ones a rename produced so an
+administrator can release one deliberately.
+
+With aliases no longer user-writable, the alias table becomes the authority for
+address ownership and is consulted before the username. The previous ordering
+existed only to stop a user-created alias from shadowing an account, a risk that
+no longer exists.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ docs/mailbox-server.md           | 26 ++++++++--
+ models/mailbox/mailbox.go        | 58 ++++++++++++++++++++++-
+ models/mailbox/mailbox_test.go   | 15 ++++++
+ options/locale/locale_en-US.json | 18 ++++++-
+ routers/web/admin/mailbox.go     | 81 ++++++++++++++++++++++++++++++++
+ routers/web/mailbox/mailbox.go   | 25 +---------
+ routers/web/web.go               |  8 +++-
+ services/context/context.go      |  1 +
+ services/mailbox/mailbox.go      | 45 ++++++++++++------
+ services/mailbox/outbound.go     |  6 +--
+ services/user/user.go            | 10 ++++
+ templates/admin/mailbox.tmpl     | 69 +++++++++++++++++++++++++++
+ templates/admin/navbar.tmpl      |  7 ++-
+ templates/mailbox/settings.tmpl  | 12 +----
+ 14 files changed, 319 insertions(+), 62 deletions(-)
+ create mode 100644 routers/web/admin/mailbox.go
+ create mode 100644 templates/admin/mailbox.tmpl
+
+diff --git a/docs/mailbox-server.md b/docs/mailbox-server.md
+index 40ccb1f010..71f5b2efb0 100644
+--- a/docs/mailbox-server.md
++++ b/docs/mailbox-server.md
+@@ -59,20 +59,38 @@ REPLY_TO_ADDRESS = incoming+%{token}@git.example.com
+ 
+ With `ALLOW_INSECURE_AUTH = false`, authenticated SMTP submission and IMAP require a TLS certificate/key pair. Leave a listener empty to disable it. Ports 465 and 993 are implicit TLS; 587 and 143 support STARTTLS when TLS is configured.
+ 
+-Each active individual Gitea account owns `<username>@DOMAIN`. Activated Gitea email addresses on the hosted domain are also accepted as inbound aliases. Additional aliases can be managed at `/mail/settings`.
++Each active individual Gitea account owns `<username>@DOMAIN` unless that local-part is assigned elsewhere. Activated Gitea email addresses on the hosted domain are also accepted as inbound aliases. Additional addresses are assigned by administrators at `/-/admin/mailbox`.
++
++## Address ownership
++
++Addresses are assigned by administrators at `/-/admin/mailbox`. Users can see which addresses reach them at `/mail/settings` but cannot create or remove any: letting a user claim an arbitrary local-part would let them claim someone else's mail identity.
++
++The alias table is the authority for who owns a local-part. An account additionally receives mail at its own username, but only while no assignment claims that local-part.
++
++### Renaming an account
++
++Gitea releases a username when its owner renames, and lets the next account register it. A mail identity must not change hands that way: password resets and confirmations sent by third parties to the old address would land in a stranger's mailbox.
++
++So on rename the old local-part is retained as a `retired` assignment bound to the original account. The consequences are:
++
++- the account keeps receiving mail at both its old and its new address;
++- an account that later registers the freed username does **not** get that address — `AddressForUser` reports no address for it, and mail to it keeps reaching the original owner;
++- an administrator can see these entries on the mailbox page, marked *Former username*, and delete one to release the address deliberately.
++
++Existing messages are stored against the account, never against a name, so nothing already delivered is affected by a rename.
+ 
+ ## Recipient resolution
+ 
+ An inbound local recipient is matched in this order:
+ 
+ 1. the tokenized `[email.incoming]` reply address, when `LOCAL_DELIVERY` is enabled;
+-2. the Gitea username, after stripping any `+tag` sub-address;
+-3. a mailbox alias from `/mail/settings`, first for the full local-part and then for the base local-part;
++2. an address assignment, first for the full local-part and then for the base local-part with any `+tag` stripped;
++3. the Gitea username, after stripping any `+tag` sub-address;
+ 4. an activated Gitea email address on the hosted domain;
+ 5. `POSTMASTER_USER` for `postmaster@` and `abuse@`, which RFC 2142 requires a public domain to accept;
+ 6. `CATCH_ALL_USER` for anything still unmatched.
+ 
+-An account name always outranks an alias, so a later registration cannot have its mail captured by an alias created earlier. Adding an alias that collides with an existing username or Gitea email address is refused. With both `POSTMASTER_USER` and `CATCH_ALL_USER` empty, unknown recipients are rejected with `550 5.1.1` at RCPT time, which is the safer default for an Internet-exposed listener.
++With both `POSTMASTER_USER` and `CATCH_ALL_USER` empty, unknown recipients are rejected with `550 5.1.1` at RCPT time, which is the safer default for an Internet-exposed listener.
+ 
+ ## DKIM, SPF and DMARC
+ 
+diff --git a/models/mailbox/mailbox.go b/models/mailbox/mailbox.go
+index e78cea42b5..a0753cdcfe 100644
+--- a/models/mailbox/mailbox.go
++++ b/models/mailbox/mailbox.go
+@@ -102,11 +102,24 @@ type MailFolder struct {
+ 	UpdatedUnix timeutil.TimeStamp `xorm:"updated NOT NULL"`
+ }
+ 
+-// Alias maps an additional local-part to a Gitea account.
++// Alias kinds. Both deliver to the owning account; the kind records where the
++// binding came from and drives what an administrator may do with it.
++const (
++	// AliasKindManual is an address an administrator assigned to an account.
++	AliasKindManual = "manual"
++	// AliasKindRetired is the local-part an account used before it was renamed.
++	// It keeps that mail identity bound to the original owner, so a new account
++	// that later claims the freed username cannot receive their mail.
++	AliasKindRetired = "retired"
++)
++
++// Alias binds a local-part to a Gitea account. This table is authoritative for
++// address ownership: a username only yields an address when no alias claims it.
+ type MailAlias struct {
+ 	ID          int64              `xorm:"pk autoincr"`
+ 	UserID      int64              `xorm:"INDEX NOT NULL"`
+ 	LocalPart   string             `xorm:"UNIQUE VARCHAR(255) NOT NULL"`
++	Kind        string             `xorm:"VARCHAR(16) NOT NULL DEFAULT 'manual'"`
+ 	CreatedUnix timeutil.TimeStamp `xorm:"created NOT NULL"`
+ }
+ 
+@@ -678,14 +691,55 @@ func UnreadCount(ctx context.Context, userID int64) (int64, error) {
+ }
+ 
+ func AddAlias(ctx context.Context, userID int64, localPart string) error {
++	return addAliasOfKind(ctx, userID, localPart, AliasKindManual)
++}
++
++func addAliasOfKind(ctx context.Context, userID int64, localPart, kind string) error {
+ 	localPart = strings.ToLower(strings.TrimSpace(localPart))
+ 	if !validLocalPart(localPart) {
+ 		return errors.New("invalid mailbox alias")
+ 	}
+-	_, err := db.GetEngine(ctx).Insert(&Alias{UserID: userID, LocalPart: localPart})
++	_, err := db.GetEngine(ctx).Insert(&Alias{UserID: userID, LocalPart: localPart, Kind: kind})
++	return err
++}
++
++// RetireLocalPart binds a local-part an account is giving up to that same
++// account, so the address keeps reaching its original owner and cannot be
++// inherited by whoever claims the freed username next. It is a no-op when the
++// local-part is already claimed, which covers a rename back and forth.
++func RetireLocalPart(ctx context.Context, userID int64, localPart string) error {
++	localPart = strings.ToLower(strings.TrimSpace(localPart))
++	if !validLocalPart(localPart) {
++		return nil
++	}
++	has, err := db.GetEngine(ctx).Where("local_part = ?", localPart).Exist(new(Alias))
++	if err != nil || has {
++		return err
++	}
++	return addAliasOfKind(ctx, userID, localPart, AliasKindRetired)
++}
++
++// ListAllAliases returns every address binding, for the administration page.
++func ListAllAliases(ctx context.Context) ([]*Alias, error) {
++	aliases := make([]*Alias, 0, 32)
++	return aliases, db.GetEngine(ctx).Asc("local_part").Find(&aliases)
++}
++
++// DeleteAliasByID removes a binding regardless of owner, for administrators.
++func DeleteAliasByID(ctx context.Context, id int64) error {
++	_, err := db.GetEngine(ctx).Where("id = ?", id).Delete(new(Alias))
+ 	return err
+ }
+ 
++// LocalPartOwner reports which account owns a local-part, if any.
++func LocalPartOwner(ctx context.Context, localPart string) (int64, bool, error) {
++	alias, err := FindAlias(ctx, localPart)
++	if err != nil {
++		return 0, false, nil
++	}
++	return alias.UserID, true, nil
++}
++
+ func DeleteAlias(ctx context.Context, userID, id int64) error {
+ 	_, err := db.GetEngine(ctx).Where("user_id = ? AND id = ?", userID, id).Delete(new(Alias))
+ 	return err
+diff --git a/models/mailbox/mailbox_test.go b/models/mailbox/mailbox_test.go
+index 8bc4eb62c8..27ce0369f5 100644
+--- a/models/mailbox/mailbox_test.go
++++ b/models/mailbox/mailbox_test.go
+@@ -73,3 +73,18 @@ func TestOutboundRecipientRoundTrip(t *testing.T) {
+ 	out.SetRecipients(nil)
+ 	assert.Nil(t, out.RecipientList())
+ }
++
++func TestAliasKindsAreDistinct(t *testing.T) {
++	// The admin page and the retirement path key off these values.
++	assert.NotEqual(t, AliasKindManual, AliasKindRetired)
++	assert.Equal(t, "manual", AliasKindManual)
++	assert.Equal(t, "retired", AliasKindRetired)
++}
++
++func TestValidLocalPartGuardsRetirement(t *testing.T) {
++	// RetireLocalPart silently skips names it could never deliver to, so a rename
++	// away from an unusual username cannot fail the rename itself.
++	assert.False(t, validLocalPart("has space"))
++	assert.False(t, validLocalPart("UPPER"))
++	assert.True(t, validLocalPart("old-name"))
++}
+diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
+index c654581f6f..bf18be95b3 100644
+--- a/options/locale/locale_en-US.json
++++ b/options/locale/locale_en-US.json
+@@ -544,8 +544,8 @@
+   "mailbox.create_folder": "Create folder",
+   "mailbox.no_custom_folders": "No custom folders configured.",
+   "mailbox.aliases": "Aliases",
+-  "mailbox.add_alias": "Add alias",
+   "mailbox.no_aliases": "No aliases configured.",
++  "mailbox.aliases_admin_managed": "Additional addresses are assigned by an administrator.",
+   "modal.yes": "Yes",
+   "modal.no": "No",
+   "modal.confirm": "Confirm",
+@@ -3503,6 +3503,22 @@
+   "admin.self_check.database_fix_mysql": "For MySQL/MariaDB users, you could use the \"gitea doctor convert\" command to fix the collation problems, or you could also fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries.",
+   "admin.self_check.database_fix_mssql": "For MSSQL users, you could only fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries at the moment.",
+   "admin.self_check.location_origin_mismatch": "Current URL (%[1]s) doesn't match the URL seen by Gitea (%[2]s). If you are using a reverse proxy, please make sure the \"Host\" and \"X-Forwarded-Proto\" headers are set correctly.",
++  "admin.mailbox": "Mail",
++  "admin.mailbox.alias_panel": "Mail Address Management",
++  "admin.mailbox.alias_help": "Addresses assigned here are delivered to the chosen account. An account also receives mail at its own username, unless that local-part is already assigned below.",
++  "admin.mailbox.alias_local_part": "address",
++  "admin.mailbox.alias_owner": "Account",
++  "admin.mailbox.alias_owner_missing": "The account for this address no longer exists",
++  "admin.mailbox.alias_add": "Assign address",
++  "admin.mailbox.alias_added": "Address assigned.",
++  "admin.mailbox.alias_removed": "Address removed.",
++  "admin.mailbox.alias_address": "Address",
++  "admin.mailbox.alias_kind": "Origin",
++  "admin.mailbox.alias_created": "Created",
++  "admin.mailbox.alias_manual": "Assigned",
++  "admin.mailbox.alias_retired": "Former username",
++  "admin.mailbox.alias_retired_help": "This account used to have this username. The address stays with it so a new account taking that username cannot receive its mail. Removing this frees the address for anyone.",
++  "admin.mailbox.alias_none": "No addresses have been assigned.",
+   "action.create_repo": "created repository <a href=\"%s\">%s</a>",
+   "action.rename_repo": "renamed repository from <code>%[1]s</code> to <a href=\"%[2]s\">%[3]s</a>",
+   "action.commit_repo": "pushed to <a href=\"%[2]s\">%[3]s</a> at <a href=\"%[1]s\">%[4]s</a>",
+diff --git a/routers/web/admin/mailbox.go b/routers/web/admin/mailbox.go
+new file mode 100644
+index 0000000000..221b3e9d72
+--- /dev/null
++++ b/routers/web/admin/mailbox.go
+@@ -0,0 +1,81 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package admin
++
++import (
++	"net/http"
++
++	mailbox_model "gitea.dev/models/mailbox"
++	user_model "gitea.dev/models/user"
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/templates"
++	"gitea.dev/services/context"
++	mailbox_service "gitea.dev/services/mailbox"
++)
++
++const tplMailbox templates.TplName = "admin/mailbox"
++
++// aliasEntry pairs a stored binding with the account that owns it, so the page
++// can show who receives an address without a lookup per row in the template.
++type aliasEntry struct {
++	Alias *mailbox_model.Alias
++	Owner *user_model.User
++}
++
++func Mailbox(ctx *context.Context) {
++	if !setting.MailboxServer.Enabled {
++		ctx.NotFound(nil)
++		return
++	}
++	aliases, err := mailbox_model.ListAllAliases(ctx)
++	if err != nil {
++		ctx.ServerError("ListAllAliases", err)
++		return
++	}
++	entries := make([]*aliasEntry, 0, len(aliases))
++	for _, alias := range aliases {
++		entry := &aliasEntry{Alias: alias}
++		if owner, err := user_model.GetUserByID(ctx, alias.UserID); err == nil {
++			entry.Owner = owner
++		}
++		entries = append(entries, entry)
++	}
++	ctx.Data["Title"] = ctx.Tr("admin.mailbox")
++	ctx.Data["PageIsAdminMailbox"] = true
++	ctx.Data["MailboxAliases"] = entries
++	ctx.Data["MailboxDomain"] = mailbox_service.Domain()
++	ctx.HTML(http.StatusOK, tplMailbox)
++}
++
++func MailboxAddAlias(ctx *context.Context) {
++	if !setting.MailboxServer.Enabled {
++		ctx.NotFound(nil)
++		return
++	}
++	owner, err := user_model.GetUserByName(ctx, ctx.FormString("username"))
++	if err != nil {
++		ctx.Flash.Error(ctx.Tr("admin.mailbox.alias_owner_missing"))
++		ctx.Redirect(setting.AppSubURL + "/-/admin/mailbox")
++		return
++	}
++	if err := mailbox_service.AddAlias(ctx, owner, ctx.FormString("local_part")); err != nil {
++		ctx.Flash.Error(err.Error())
++	} else {
++		ctx.Flash.Success(ctx.Tr("admin.mailbox.alias_added"))
++	}
++	ctx.Redirect(setting.AppSubURL + "/-/admin/mailbox")
++}
++
++func MailboxDeleteAlias(ctx *context.Context) {
++	if !setting.MailboxServer.Enabled {
++		ctx.NotFound(nil)
++		return
++	}
++	if err := mailbox_model.DeleteAliasByID(ctx, ctx.FormInt64("id")); err != nil {
++		ctx.ServerError("DeleteAliasByID", err)
++		return
++	}
++	ctx.Flash.Success(ctx.Tr("admin.mailbox.alias_removed"))
++	ctx.Redirect(setting.AppSubURL + "/-/admin/mailbox")
++}
+diff --git a/routers/web/mailbox/mailbox.go b/routers/web/mailbox/mailbox.go
+index 381c42e07d..a28b796b93 100644
+--- a/routers/web/mailbox/mailbox.go
++++ b/routers/web/mailbox/mailbox.go
+@@ -50,7 +50,7 @@ func prepareCommon(ctx *context.Context) bool {
+ 	ctx.Data["PageIsMailbox"] = true
+ 	ctx.Data["MailboxFolders"] = folders
+ 	ctx.Data["MailboxUnread"] = unread
+-	ctx.Data["MailboxAddress"] = mailbox_service.AddressForUser(ctx.Doer)
++	ctx.Data["MailboxAddress"] = mailbox_service.AddressForUser(ctx, ctx.Doer)
+ 	return true
+ }
+ 
+@@ -348,26 +348,3 @@ func DeleteFolder(ctx *context.Context) {
+ 	}
+ 	ctx.Redirect(setting.AppSubURL + "/mail/settings")
+ }
+-
+-func AddAlias(ctx *context.Context) {
+-	if !prepareCommon(ctx) {
+-		return
+-	}
+-	if err := mailbox_service.AddAlias(ctx, ctx.Doer, ctx.FormString("local_part")); err != nil {
+-		ctx.Flash.Error(err.Error())
+-	} else {
+-		ctx.Flash.Success("Email alias added")
+-	}
+-	ctx.Redirect(setting.AppSubURL + "/mail/settings")
+-}
+-
+-func DeleteAlias(ctx *context.Context) {
+-	if !prepareCommon(ctx) {
+-		return
+-	}
+-	if err := mailbox_model.DeleteAlias(ctx, ctx.Doer.ID, ctx.PathParamInt64("id")); err != nil {
+-		ctx.ServerError("DeleteAlias", err)
+-		return
+-	}
+-	ctx.Redirect(setting.AppSubURL + "/mail/settings")
+-}
+diff --git a/routers/web/web.go b/routers/web/web.go
+index 60b339d0c2..52fc66cda4 100644
+--- a/routers/web/web.go
++++ b/routers/web/web.go
+@@ -810,6 +810,12 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+ 			m.Get("/diagnosis", admin.MonitorDiagnosis)
+ 		})
+ 
++		m.Group("/mailbox", func() {
++			m.Get("", admin.Mailbox)
++			m.Post("/aliases", admin.MailboxAddAlias)
++			m.Post("/aliases/delete", admin.MailboxDeleteAlias)
++		})
++
+ 		m.Group("/users", func() {
+ 			m.Get("", admin.Users)
+ 			m.Combo("/new").Get(admin.NewUser).Post(web.Bind[*forms.AdminCreateUserForm](), admin.NewUserPost)
+@@ -1768,8 +1774,6 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+ 		m.Get("/settings", mailbox_router.Settings)
+ 		m.Post("/settings/folders", mailbox_router.CreateFolder)
+ 		m.Post("/settings/folders/delete", mailbox_router.DeleteFolder)
+-		m.Post("/settings/aliases", mailbox_router.AddAlias)
+-		m.Post("/settings/aliases/{id}/delete", mailbox_router.DeleteAlias)
+ 		m.Get("/{id}", mailbox_router.View)
+ 		m.Post("/{id}/action", mailbox_router.Action)
+ 		m.Get("/{id}/raw", mailbox_router.Raw)
+diff --git a/services/context/context.go b/services/context/context.go
+index 9f51925806..b9df96d69b 100644
+--- a/services/context/context.go
++++ b/services/context/context.go
+@@ -191,6 +191,7 @@ func Contexter() func(next http.Handler) http.Handler {
+ 			ctx.Data["DisableStars"] = setting.Repository.DisableStars
+ 			ctx.Data["EnableActions"] = setting.Actions.Enabled && !unit.TypeActions.UnitGlobalDisabled()
+ 			ctx.Data["MailboxEnabled"] = setting.MailboxServer.Enabled && setting.MailboxServer.WebEnabled
++			ctx.Data["MailboxServerEnabled"] = setting.MailboxServer.Enabled
+ 
+ 			ctx.Data["AllLangs"] = translation.AllLangs()
+ 
+diff --git a/services/mailbox/mailbox.go b/services/mailbox/mailbox.go
+index 3ec353bb10..cb5dfa6f53 100644
+--- a/services/mailbox/mailbox.go
++++ b/services/mailbox/mailbox.go
+@@ -63,11 +63,19 @@ func Domain() string {
+ 	return strings.ToLower(strings.TrimSpace(setting.MailboxServer.Domain))
+ }
+ 
+-func AddressForUser(user *user_model.User) string {
++// AddressForUser returns the account's own address, or "" when it has none.
++// A username only yields an address when no alias claims that local-part: after
++// a rename the old local-part stays bound to its original owner, so an account
++// that later claims the freed username does not inherit their mail identity.
++func AddressForUser(ctx context.Context, user *user_model.User) string {
+ 	if user == nil {
+ 		return ""
+ 	}
+-	return strings.ToLower(user.Name) + "@" + Domain()
++	local := strings.ToLower(user.Name)
++	if owner, claimed, err := mailbox_model.LocalPartOwner(ctx, local); err == nil && claimed && owner != user.ID {
++		return ""
++	}
++	return local + "@" + Domain()
+ }
+ 
+ func IsLocalAddress(address string) bool {
+@@ -96,16 +104,10 @@ func ResolveRecipient(ctx context.Context, address string) (*user_model.User, er
+ 		baseLocal = baseLocal[:i]
+ 	}
+ 
+-	// An account name always wins over an alias. AddAlias rejects local-parts that
+-	// collide with a username, but an account registered after the alias would
+-	// otherwise have its own mail silently delivered to the alias owner.
+-	if user, err := user_model.GetIndividualUserByName(ctx, baseLocal); err == nil {
+-		if !user.IsActive || user.ProhibitLogin {
+-			return nil, ErrNotLocalRecipient
+-		}
+-		return user, nil
+-	}
+-
++	// The alias table is the authority for who owns an address. Only an
++	// administrator can write to it, so it cannot be used to shadow an account,
++	// and a local-part retired by a rename keeps reaching its original owner
++	// instead of whoever claims the freed username next.
+ 	if alias, err := mailbox_model.FindAlias(ctx, local); err == nil {
+ 		return deliverableUser(ctx, alias.UserID)
+ 	}
+@@ -113,6 +115,13 @@ func ResolveRecipient(ctx context.Context, address string) (*user_model.User, er
+ 		return deliverableUser(ctx, alias.UserID)
+ 	}
+ 
++	if user, err := user_model.GetIndividualUserByName(ctx, baseLocal); err == nil {
++		if !user.IsActive || user.ProhibitLogin {
++			return nil, ErrNotLocalRecipient
++		}
++		return user, nil
++	}
++
+ 	// Also allow a verified Gitea address on the hosted domain to be used as an
+ 	// inbound alias even when its local-part differs from the username.
+ 	user, err := user_model.GetUserByEmail(ctx, parsed.Address)
+@@ -220,7 +229,7 @@ func SenderAllowed(ctx context.Context, user *user_model.User, from string) bool
+ 	if err != nil {
+ 		return false
+ 	}
+-	if strings.EqualFold(parsed.Address, AddressForUser(user)) {
++	if own := AddressForUser(ctx, user); own != "" && strings.EqualFold(parsed.Address, own) {
+ 		return true
+ 	}
+ 	if IsLocalAddress(parsed.Address) {
+@@ -515,9 +524,15 @@ func AddAlias(ctx context.Context, user *user_model.User, localPart string) erro
+ 	if incoming_service.IsHandlerAddress(address) {
+ 		return errors.New("alias conflicts with the Gitea incoming-email handler")
+ 	}
+-	if existing, err := user_model.GetIndividualUserByName(ctx, localPart); err == nil && existing != nil {
++	if existing, err := user_model.GetIndividualUserByName(ctx, localPart); err == nil && existing != nil && existing.ID != user.ID {
+ 		return errors.New("alias conflicts with an existing Gitea username")
+ 	}
++	if owner, claimed, err := mailbox_model.LocalPartOwner(ctx, localPart); err == nil && claimed {
++		if owner == user.ID {
++			return errors.New("the account already owns this address")
++		}
++		return errors.New("address is already assigned to another account")
++	}
+ 	if existing, err := user_model.GetUserByEmail(ctx, address); err == nil && existing != nil {
+ 		return errors.New("alias conflicts with an existing Gitea email address")
+ 	}
+@@ -549,7 +564,7 @@ func ComposeAndSend(ctx context.Context, user *user_model.User, to, cc, bcc []st
+ 	if len(allRecipients) == 0 {
+ 		return nil, errors.New("at least one recipient is required")
+ 	}
+-	from := AddressForUser(user)
++	from := AddressForUser(ctx, user)
+ 	raw, err := BuildMessage(user.DisplayName(), from, to, cc, bcc, subject, body, attachments)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/services/mailbox/outbound.go b/services/mailbox/outbound.go
+index 37c2c5e228..30d5002229 100644
+--- a/services/mailbox/outbound.go
++++ b/services/mailbox/outbound.go
+@@ -372,13 +372,13 @@ func notifyOutboundFailure(ctx context.Context, out *mailbox_model.Outbound, rec
+ 	}
+ 	body := fmt.Sprintf("Delivery to the following recipients failed permanently:\r\n\r\n%s\r\n\r\nReason: %s\r\nDetail: %s\r\n",
+ 		strings.Join(recipients, "\r\n"), reason, cause)
+-	notice := buildDeliveryStatusNotice(user, out, body)
++	notice := buildDeliveryStatusNotice(ctx, user, out, body)
+ 	if _, err := StoreRaw(ctx, user, mailbox_model.FolderInbox, notice, false); err != nil {
+ 		log.Error("Mailbox outbound: cannot store delivery failure notice for user %d: %v", out.UserID, err)
+ 	}
+ }
+ 
+-func buildDeliveryStatusNotice(user *user_model.User, out *mailbox_model.Outbound, body string) []byte {
++func buildDeliveryStatusNotice(ctx context.Context, user *user_model.User, out *mailbox_model.Outbound, body string) []byte {
+ 	header := fmt.Sprintf("From: Mail Delivery Subsystem <postmaster@%s>\r\n"+
+ 		"To: %s\r\n"+
+ 		"Subject: Undelivered mail returned to sender\r\n"+
+@@ -387,7 +387,7 @@ func buildDeliveryStatusNotice(user *user_model.User, out *mailbox_model.Outboun
+ 		"Auto-Submitted: auto-replied\r\n"+
+ 		"Content-Type: text/plain; charset=utf-8\r\n"+
+ 		"\r\n",
+-		Domain(), AddressForUser(user), time.Now().Format(time.RFC1123Z), out.ID, time.Now().UnixNano(), Domain())
++		Domain(), AddressForUser(ctx, user), time.Now().Format(time.RFC1123Z), out.ID, time.Now().UnixNano(), Domain())
+ 	return []byte(header + body)
+ }
+ 
+diff --git a/services/user/user.go b/services/user/user.go
+index d03809d882..f6e84d53ec 100644
+--- a/services/user/user.go
++++ b/services/user/user.go
+@@ -11,6 +11,7 @@ import (
+ 	"time"
+ 
+ 	"gitea.dev/models/db"
++	mailbox_model "gitea.dev/models/mailbox"
+ 	"gitea.dev/models/organization"
+ 	packages_model "gitea.dev/models/packages"
+ 	repo_model "gitea.dev/models/repo"
+@@ -83,6 +84,15 @@ func RenameUser(ctx context.Context, u *user_model.User, newUserName string, doe
+ 		return err
+ 	}
+ 
++	// Gitea frees the old username for anyone to register, but a mail identity
++	// must not change hands: keep the old local-part bound to this account so a
++	// future account with that name cannot receive its mail.
++	if setting.MailboxServer.Enabled && !u.IsOrganization() {
++		if err = mailbox_model.RetireLocalPart(ctx, u.ID, oldUserName); err != nil {
++			return fmt.Errorf("retire mailbox local-part %q: %w", oldUserName, err)
++		}
++	}
++
+ 	if err := agit.UserNameChanged(ctx, u, newUserName); err != nil {
+ 		return err
+ 	}
+diff --git a/templates/admin/mailbox.tmpl b/templates/admin/mailbox.tmpl
+new file mode 100644
+index 0000000000..3c4d8a83ea
+--- /dev/null
++++ b/templates/admin/mailbox.tmpl
+@@ -0,0 +1,69 @@
++{{template "admin/layout_head" (dict "pageClass" "admin mailbox")}}
++	<div class="admin-setting-content">
++		<h4 class="ui top attached header">
++			{{ctx.Locale.Tr "admin.mailbox.alias_panel"}} ({{ctx.Locale.Tr "admin.total" (len .MailboxAliases)}})
++		</h4>
++		<div class="ui attached segment">
++			<p class="muted">{{ctx.Locale.Tr "admin.mailbox.alias_help"}}</p>
++			<form class="ui form" method="post" action="{{AppSubUrl}}/-/admin/mailbox/aliases">
++				<div class="inline fields">
++					<div class="field">
++						<div class="ui right labeled input">
++							<input name="local_part" required placeholder="{{ctx.Locale.Tr "admin.mailbox.alias_local_part"}}">
++							<div class="ui basic label">@{{.MailboxDomain}}</div>
++						</div>
++					</div>
++					<div class="field">
++						<input name="username" required placeholder="{{ctx.Locale.Tr "admin.mailbox.alias_owner"}}">
++					</div>
++					<div class="field">
++						<button class="ui primary button" type="submit">{{ctx.Locale.Tr "admin.mailbox.alias_add"}}</button>
++					</div>
++				</div>
++			</form>
++		</div>
++		<div class="ui attached table segment">
++			<table class="ui very basic striped table unstackable">
++				<thead>
++					<tr>
++						<th>{{ctx.Locale.Tr "admin.mailbox.alias_address"}}</th>
++						<th>{{ctx.Locale.Tr "admin.mailbox.alias_owner"}}</th>
++						<th>{{ctx.Locale.Tr "admin.mailbox.alias_kind"}}</th>
++						<th>{{ctx.Locale.Tr "admin.mailbox.alias_created"}}</th>
++						<th></th>
++					</tr>
++				</thead>
++				<tbody>
++					{{range .MailboxAliases}}
++						<tr>
++							<td><code>{{.Alias.LocalPart}}@{{$.MailboxDomain}}</code></td>
++							<td>
++								{{if .Owner}}
++									<a href="{{AppSubUrl}}/-/admin/users/{{.Owner.ID}}">{{.Owner.Name}}</a>
++								{{else}}
++									<span class="muted">{{ctx.Locale.Tr "admin.mailbox.alias_owner_missing"}}</span>
++								{{end}}
++							</td>
++							<td>
++								{{if eq .Alias.Kind "retired"}}
++									<span class="ui grey label" data-tooltip-content="{{ctx.Locale.Tr "admin.mailbox.alias_retired_help"}}">{{ctx.Locale.Tr "admin.mailbox.alias_retired"}}</span>
++								{{else}}
++									<span class="ui basic label">{{ctx.Locale.Tr "admin.mailbox.alias_manual"}}</span>
++								{{end}}
++							</td>
++							<td>{{DateUtils.AbsoluteShort .Alias.CreatedUnix}}</td>
++							<td class="tw-text-right">
++								<form method="post" action="{{AppSubUrl}}/-/admin/mailbox/aliases/delete">
++									<input type="hidden" name="id" value="{{.Alias.ID}}">
++									<button class="ui basic red mini button" type="submit">{{ctx.Locale.Tr "remove"}}</button>
++								</form>
++							</td>
++						</tr>
++					{{else}}
++						<tr><td colspan="5" class="muted">{{ctx.Locale.Tr "admin.mailbox.alias_none"}}</td></tr>
++					{{end}}
++				</tbody>
++			</table>
++		</div>
++	</div>
++{{template "admin/layout_footer" .}}
+diff --git a/templates/admin/navbar.tmpl b/templates/admin/navbar.tmpl
+index a54fa530e2..f278f0c751 100644
+--- a/templates/admin/navbar.tmpl
++++ b/templates/admin/navbar.tmpl
+@@ -13,7 +13,7 @@
+ 				</a>
+ 			</div>
+ 		</details>
+-		<details class="item" {{if or .PageIsAdminUsers .PageIsAdminBadges .PageIsAdminEmails .PageIsAdminOrganizations .PageIsAdminAuthentications}}open{{end}}>
++		<details class="item" {{if or .PageIsAdminUsers .PageIsAdminBadges .PageIsAdminEmails .PageIsAdminMailbox .PageIsAdminOrganizations .PageIsAdminAuthentications}}open{{end}}>
+ 			<summary>{{ctx.Locale.Tr "admin.identity_access"}}</summary>
+ 			<div class="menu">
+ 				<a class="{{if .PageIsAdminAuthentications}}active {{end}}item" href="{{AppSubUrl}}/-/admin/auths">
+@@ -31,6 +31,11 @@
+ 				<a class="{{if .PageIsAdminEmails}}active {{end}}item" href="{{AppSubUrl}}/-/admin/emails">
+ 					{{ctx.Locale.Tr "admin.emails"}}
+ 				</a>
++				{{if .MailboxServerEnabled}}
++					<a class="{{if .PageIsAdminMailbox}}active {{end}}item" href="{{AppSubUrl}}/-/admin/mailbox">
++						{{ctx.Locale.Tr "admin.mailbox"}}
++					</a>
++				{{end}}
+ 			</div>
+ 		</details>
+ 		<details class="item" {{if or .PageIsAdminRepositories (and .EnablePackages .PageIsAdminPackages)}}open{{end}}>
+diff --git a/templates/mailbox/settings.tmpl b/templates/mailbox/settings.tmpl
+index 8efde07235..9413d3c558 100644
+--- a/templates/mailbox/settings.tmpl
++++ b/templates/mailbox/settings.tmpl
+@@ -34,18 +34,10 @@
+ 				</div>
+ 				<div class="ui segment">
+ 					<h3 class="ui header">{{ctx.Locale.Tr "mailbox.aliases"}}</h3>
+-					<form class="ui form tw-mb-4" method="post" action="{{AppSubUrl}}/mail/settings/aliases">
+-						<div class="inline fields">
+-							<div class="field"><div class="ui right labeled input"><input name="local_part" required placeholder="alias"><div class="ui basic label">@{{.MailboxDomain}}</div></div></div>
+-							<div class="field"><button class="ui primary button" type="submit">{{ctx.Locale.Tr "mailbox.add_alias"}}</button></div>
+-						</div>
+-					</form>
++					<p class="muted">{{ctx.Locale.Tr "mailbox.aliases_admin_managed"}}</p>
+ 					<div class="ui divided list">
+ 					{{range .MailboxAliases}}
+-						<div class="item tw-flex tw-items-center">
+-							<div class="content tw-flex-1"><code>{{.LocalPart}}@{{$.MailboxDomain}}</code></div>
+-							<form method="post" action="{{AppSubUrl}}/mail/settings/aliases/{{.ID}}/delete"><button class="ui basic red mini button" type="submit">{{ctx.Locale.Tr "mailbox.delete"}}</button></form>
+-						</div>
++						<div class="item"><code>{{.LocalPart}}@{{$.MailboxDomain}}</code></div>
+ 					{{else}}
+ 						<div class="item muted">{{ctx.Locale.Tr "mailbox.no_aliases"}}</div>
+ 					{{end}}
+-- 
+2.55.0
+

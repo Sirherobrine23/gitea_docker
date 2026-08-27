@@ -1,0 +1,1472 @@
+From 973003c6b92734836c44641750bd7598e01572e5 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 19 Aug 2026 00:43:39 +0000
+Subject: [PATCH 11/17] feat(mailbox): deliver remote mail directly to MX so
+ [mailer] is optional
+
+The integrated server could host mailboxes but still leaned on the [mailer]
+transport for every remote recipient, so removing postfix only moved the
+dependency. With OUTBOUND_MODE = direct, which is the new default, the server
+resolves the recipient domain itself and delivers to its MX, and an instance
+with only [mailbox] configured can send all of its mail.
+
+Outbound path:
+- group remote recipients by destination domain and queue them in a new
+  mailbox_outbound table, so a slow or unreachable destination never blocks an
+  SMTP session or a web request
+- resolve MX in preference order, fall back to the domain's address record when
+  no MX is published (RFC 5321 5.1), and refuse a null MX (RFC 7505)
+- upgrade with STARTTLS when offered. Certificates are not verified by default:
+  MX hosts routinely present names that do not match the record used to reach
+  them, so demanding a valid chain would drop legitimate mail. This is the
+  opportunistic model of RFC 7435; OUTBOUND_REQUIRE_TLS demands a verified
+  chain instead
+- classify 5xx as permanent and 4xx, DNS temporary failures and dropped
+  connections as deferrals, retrying with a widening backoff until
+  OUTBOUND_RETRY_MAX_AGE
+- file a delivery status notice into the sender's mailbox when a message is
+  finally given up on, standing in for the bounce an edge MTA would return
+
+Queue rows are leased with a conditional update before a worker takes them, so
+overlapping runs or a second instance on the same database cannot deliver the
+same message twice.
+
+Making [mailer] optional:
+- add mailer.MailEnabled(), true when either transport can carry mail, and use
+  it for the guards that previously required [mailer]: the mail queue and its
+  notifier, password reset, registration confirmation, team invites and the
+  admin send-email action all now work with [mailbox] alone
+- the mailbox-aware sender routes remote recipients through the direct path and
+  reports a clear error if something still reaches a nil [mailer] transport
+
+OUTBOUND_MODE = relay keeps the previous behaviour for deployments behind a
+smarthost or on hosts that cannot open outbound port 25.
+
+Docs spell out that direct mode needs the operator to look like a legitimate
+sender: static egress IP, forward-confirmed rDNS matching OUTBOUND_HELO, SPF
+covering it and DKIM enabled.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ custom/conf/app.example.ini          |  27 +-
+ docs/mailbox-server.md               |  33 +-
+ models/mailbox/mailbox_test.go       |  11 +
+ models/mailbox/outbound.go           | 121 ++++++++
+ modules/setting/mailbox.go           |  45 +++
+ routers/private/mail.go              |   7 +-
+ routers/web/admin/users.go           |   4 +-
+ routers/web/auth/auth.go             |   2 +-
+ routers/web/auth/password.go         |   4 +-
+ routers/web/org/teams.go             |   5 +-
+ services/mailbox/mailbox.go          |  49 ++-
+ services/mailbox/outbound.go         | 436 +++++++++++++++++++++++++++
+ services/mailbox/outbound_test.go    | 106 +++++++
+ services/mailbox/server.go           |   5 +
+ services/mailbox/smtp.go             |   3 +
+ services/mailer/mail.go              |   2 +-
+ services/mailer/mail_comment.go      |   5 +-
+ services/mailer/mail_issue.go        |   5 +-
+ services/mailer/mail_release.go      |   2 +-
+ services/mailer/mail_repo.go         |   4 +-
+ services/mailer/mail_team_invite.go  |   2 +-
+ services/mailer/mail_user.go         |   8 +-
+ services/mailer/mail_workflow_run.go |   2 +-
+ services/mailer/mailbox_sender.go    |  19 +-
+ services/mailer/mailer.go            |  28 +-
+ 25 files changed, 880 insertions(+), 55 deletions(-)
+ create mode 100644 models/mailbox/outbound.go
+ create mode 100644 services/mailbox/outbound.go
+ create mode 100644 services/mailbox/outbound_test.go
+
+diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
+index 104598c6f9..4cc2f1d248 100644
+--- a/custom/conf/app.example.ini
++++ b/custom/conf/app.example.ini
+@@ -1986,9 +1986,34 @@ LEVEL = Info
+ ;; Allow SMTP AUTH and IMAP LOGIN over a cleartext connection. Keep false outside testing.
+ ;ALLOW_INSECURE_AUTH = false
+ ;;
+-;; Allow authenticated users to send to remote domains through the [mailer] transport.
++;; Allow authenticated users to send to remote domains.
+ ;RELAY_ENABLED = true
+ ;;
++;; How mail for remote domains leaves this instance.
++;;   direct - resolve the recipient domain's MX and deliver straight to it. No
++;;            [mailer] transport is needed. Requires outbound port 25 to be open
++;;            and correct rDNS/SPF/DKIM to be accepted by other providers.
++;;   relay  - hand remote recipients to the [mailer] transport. Use this behind a
++;;            smarthost, or when the host cannot deliver on port 25.
++;OUTBOUND_MODE = direct
++;;
++;; Name used in the EHLO greeting when delivering. Defaults to HOSTNAME.
++;; It should have a forward-confirmed reverse DNS record for the egress IP.
++;OUTBOUND_HELO =
++;;
++;; Require a verified TLS chain when delivering. Off by default: MX hosts
++;; commonly present certificates that do not match, and refusing them would drop
++;; legitimate mail. When false, TLS is still used opportunistically (RFC 7435).
++;OUTBOUND_REQUIRE_TLS = false
++;;
++;; How long a deferred message keeps being retried before it is returned to the
++;; sender, and how often the retry queue is scanned.
++;OUTBOUND_RETRY_MAX_AGE = 72h
++;OUTBOUND_RETRY_EVERY = 5m
++;;
++;; Number of destinations delivered to in parallel.
++;OUTBOUND_CONCURRENCY = 4
++;;
+ ;; Limits. MAX_MESSAGE_SIZE and DEFAULT_QUOTA are bytes; 0 means unlimited.
+ ;MAX_MESSAGE_SIZE = 26214400
+ ;MAX_RECIPIENTS = 100
+diff --git a/docs/mailbox-server.md b/docs/mailbox-server.md
+index 4b3391b5e3..40ccb1f010 100644
+--- a/docs/mailbox-server.md
++++ b/docs/mailbox-server.md
+@@ -19,6 +19,14 @@ TLS_CERT_FILE = /etc/gitea/mail/fullchain.pem
+ TLS_KEY_FILE = /etc/gitea/mail/privkey.pem
+ ALLOW_INSECURE_AUTH = false
+ RELAY_ENABLED = true
++
++# Remote delivery. "direct" needs no [mailer] at all.
++OUTBOUND_MODE = direct
++OUTBOUND_HELO = mail.git.example.com
++OUTBOUND_REQUIRE_TLS = false
++OUTBOUND_RETRY_MAX_AGE = 72h
++OUTBOUND_RETRY_EVERY = 5m
++OUTBOUND_CONCURRENCY = 4
+ MAX_MESSAGE_SIZE = 26214400
+ MAX_RECIPIENTS = 100
+ DEFAULT_QUOTA = 0
+@@ -105,9 +113,30 @@ _dmarc.git.example.com. TXT "v=DMARC1; p=reject; adkim=r; aspf=r; pct=100"
+ 
+ The exact SPF policy must describe the systems that really emit mail for your domain. If `[mailer]` relays through a separate provider, that provider must be represented in SPF as appropriate. Configure PTR/rDNS for the SMTP egress host as well.
+ 
++## Outbound delivery
++
++`OUTBOUND_MODE` decides how mail for remote domains leaves the instance.
++
++With `direct` (the default) the server is a complete MTA and `[mailer]` is not required at all. Remote recipients are grouped by destination domain and queued in `mailbox_outbound`, then delivered by a background worker that:
++
++- resolves the domain's MX records and tries them in preference order, falling back to the domain's A/AAAA record when it publishes no MX (RFC 5321 5.1) and refusing a null MX (RFC 7505);
++- upgrades the connection with STARTTLS when the peer offers it. Certificates are *not* verified by default, because MX hosts routinely present names that do not match the record used to reach them; this is the opportunistic model of RFC 7435, and encryption without authentication is still better than cleartext. Set `OUTBOUND_REQUIRE_TLS = true` to demand a verified chain and refuse to deliver without one;
++- treats a 5xx reply as permanent and a 4xx reply, a DNS temporary failure or a dropped connection as a deferral;
++- retries deferrals with a widening backoff (5m, 15m, 30m, then hourly) until `OUTBOUND_RETRY_MAX_AGE`, after which the message is given up on.
++
++When a message is given up on, a delivery status notice is filed into the sender's own mailbox, which stands in for the bounce an edge MTA would normally return. Mail this instance did not originate has no local sender to notify and is only logged.
++
++Queue rows are leased before they are handed to a worker, so overlapping runs — or a second Gitea instance on the same database — cannot deliver the same message twice.
++
++With `relay`, remote recipients are handed to the `[mailer]` transport instead. Use it behind a smarthost, or when the host cannot open outbound port 25, which many cloud providers and every residential ISP block.
++
++Direct mode requires the operator to look like a legitimate sender: a static egress IP with forward-confirmed reverse DNS matching `OUTBOUND_HELO`, an SPF record covering that IP, and DKIM signing enabled. Without those, large providers will reject or spam-file the mail regardless of how correct the SMTP conversation is.
++
+ ## Existing Gitea mail integration
+ 
+-When `[mailer]` is enabled, Gitea-generated messages are partitioned before sending. Recipients hosted by `[mailbox] DOMAIN` are written directly to their local mailbox; other recipients continue through the configured Gitea mailer transport. DKIM signing happens before this partition, so the same signed RFC 5322 message is used for both local and remote copies.
++Gitea-generated messages are partitioned before sending. Recipients hosted by `[mailbox] DOMAIN` are written directly to their local mailbox; other recipients follow `OUTBOUND_MODE`. DKIM signing happens before this partition, so the same signed RFC 5322 message is used for both local and remote copies.
++
++Because the integrated server can carry Gitea's own notifications, `[mailer]` may be omitted entirely: password resets, registration confirmations, team invites and notification mail all work with `[mailbox]` alone.
+ 
+ When `[email.incoming] LOCAL_DELIVERY = true`, tokenized reply-by-email addresses are consumed directly by the integrated SMTP listener. The existing incoming-mail token decoder and issue/pull-request handlers are reused; the external IMAP polling loop is disabled.
+ 
+@@ -143,4 +172,4 @@ Gitea supplies only the parts that are specific to it: the session backends, rec
+ 
+ The integrated server covers the mailbox-facing SMTP path (local recipient validation, authenticated relay and null reverse paths) and an IMAP4 server backed by the same database storage. HTML mail is sanitized before rendering in the authenticated web UI.
+ 
+-Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution, an outbound retry queue, bounce processing, reputation/greylisting, antivirus or content-spam filtering. DKIM signing plus inbound DKIM/SPF/DMARC authentication are native, but a production Internet mail deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the deployment boundary.
++MX resolution, opportunistic TLS, deferral retries and delivery status notices are native. Not implemented: full RFC 3464 DSN bodies (the notice is a plain-text message), inbound greylisting, reputation scoring, antivirus and content-spam filtering. A production Internet deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the boundary.
+diff --git a/models/mailbox/mailbox_test.go b/models/mailbox/mailbox_test.go
+index fc202b113d..8bc4eb62c8 100644
+--- a/models/mailbox/mailbox_test.go
++++ b/models/mailbox/mailbox_test.go
+@@ -62,3 +62,14 @@ func TestNewUIDValidity(t *testing.T) {
+ 		assert.NotZero(t, newUIDValidity())
+ 	}
+ }
++
++func TestOutboundRecipientRoundTrip(t *testing.T) {
++	out := &Outbound{}
++	assert.Nil(t, out.RecipientList())
++
++	out.SetRecipients([]string{"a@example.com", "b@example.com"})
++	assert.Equal(t, []string{"a@example.com", "b@example.com"}, out.RecipientList())
++
++	out.SetRecipients(nil)
++	assert.Nil(t, out.RecipientList())
++}
+diff --git a/models/mailbox/outbound.go b/models/mailbox/outbound.go
+new file mode 100644
+index 0000000000..947af5bfcc
+--- /dev/null
++++ b/models/mailbox/outbound.go
+@@ -0,0 +1,121 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"context"
++	"errors"
++	"strings"
++
++	"gitea.dev/models/db"
++	"gitea.dev/modules/timeutil"
++)
++
++// MailOutbound is one queued remote delivery. A message with several remote
++// recipients is stored as one row per recipient domain, which is the unit a
++// single SMTP conversation can deliver and therefore the unit that can be
++// retried, deferred or failed independently.
++type MailOutbound struct {
++	ID     int64  `xorm:"pk autoincr"`
++	UserID int64  `xorm:"INDEX NOT NULL DEFAULT 0"`
++	Domain string `xorm:"INDEX VARCHAR(255) NOT NULL"`
++
++	FromAddress string `xorm:"VARCHAR(320) NOT NULL"`
++	Recipients  string `xorm:"TEXT NOT NULL"`
++	Raw         []byte `xorm:"LONGBLOB"`
++
++	Attempts    int                `xorm:"NOT NULL DEFAULT 0"`
++	LastError   string             `xorm:"TEXT"`
++	LastCode    int                `xorm:"NOT NULL DEFAULT 0"`
++	NextAttempt timeutil.TimeStamp `xorm:"INDEX NOT NULL"`
++
++	CreatedUnix timeutil.TimeStamp `xorm:"created NOT NULL"`
++	UpdatedUnix timeutil.TimeStamp `xorm:"updated NOT NULL"`
++}
++
++func (*MailOutbound) TableName() string { return "mailbox_outbound" }
++
++func init() {
++	db.RegisterModel(new(MailOutbound))
++}
++
++// Outbound keeps the package API readable; see the Message type alias comment.
++type Outbound = MailOutbound
++
++var ErrOutboundNotExist = errors.New("mailbox outbound message does not exist")
++
++// RecipientList splits the stored recipient set.
++func (o *MailOutbound) RecipientList() []string {
++	if strings.TrimSpace(o.Recipients) == "" {
++		return nil
++	}
++	return strings.Split(o.Recipients, "\n")
++}
++
++// SetRecipients stores the recipient set for one destination domain.
++func (o *MailOutbound) SetRecipients(recipients []string) {
++	o.Recipients = strings.Join(recipients, "\n")
++}
++
++func InsertOutbound(ctx context.Context, out *Outbound) error {
++	if out.Domain == "" {
++		return errors.New("outbound domain is required")
++	}
++	if out.NextAttempt == 0 {
++		out.NextAttempt = timeutil.TimeStampNow()
++	}
++	_, err := db.GetEngine(ctx).Insert(out)
++	return err
++}
++
++// ClaimDueOutbound returns queued deliveries whose next attempt has come due.
++// The rows are pushed forward before they are handed out so a concurrent worker
++// or a second instance cannot pick up the same delivery.
++func ClaimDueOutbound(ctx context.Context, limit int, leaseUntil timeutil.TimeStamp) ([]*Outbound, error) {
++	if limit <= 0 {
++		return nil, nil
++	}
++	claimed := make([]*Outbound, 0, limit)
++	err := db.WithTx(ctx, func(ctx context.Context) error {
++		due := make([]*Outbound, 0, limit)
++		if err := db.GetEngine(ctx).Where("next_attempt <= ?", timeutil.TimeStampNow()).
++			Asc("next_attempt").Limit(limit).Find(&due); err != nil {
++			return err
++		}
++		for _, out := range due {
++			// The lease is a conditional update on the value that was read, so only
++			// one worker can win a given row.
++			updated, err := db.GetEngine(ctx).Where("id = ? AND next_attempt = ?", out.ID, out.NextAttempt).
++				Cols("next_attempt").Update(&Outbound{NextAttempt: leaseUntil})
++			if err != nil {
++				return err
++			}
++			if updated == 1 {
++				claimed = append(claimed, out)
++			}
++		}
++		return nil
++	})
++	return claimed, err
++}
++
++// RescheduleOutbound records a failed attempt and sets the next retry time.
++func RescheduleOutbound(ctx context.Context, id int64, attempts int, code int, lastError string, next timeutil.TimeStamp) error {
++	if len(lastError) > 1024 {
++		lastError = lastError[:1024]
++	}
++	_, err := db.GetEngine(ctx).Where("id = ?", id).Cols("attempts", "last_code", "last_error", "next_attempt").
++		Update(&Outbound{Attempts: attempts, LastCode: code, LastError: lastError, NextAttempt: next})
++	return err
++}
++
++func DeleteOutbound(ctx context.Context, id int64) error {
++	_, err := db.GetEngine(ctx).Where("id = ?", id).Delete(new(Outbound))
++	return err
++}
++
++// CountOutbound reports the queue depth, for the mail settings page.
++func CountOutbound(ctx context.Context, userID int64) (int64, error) {
++	return db.GetEngine(ctx).Where("user_id = ?", userID).Count(new(Outbound))
++}
+diff --git a/modules/setting/mailbox.go b/modules/setting/mailbox.go
+index 871296e092..f6e8f2bb04 100644
+--- a/modules/setting/mailbox.go
++++ b/modules/setting/mailbox.go
+@@ -5,6 +5,17 @@ package setting
+ 
+ import (
+ 	"strings"
++	"time"
++)
++
++// Outbound delivery modes for remote recipients.
++const (
++	// OutboundModeDirect resolves the recipient domain's MX records and delivers
++	// straight to it, so no [mailer] transport is required.
++	OutboundModeDirect = "direct"
++	// OutboundModeRelay hands remote recipients to the configured [mailer]
++	// transport, which is the right choice behind a smarthost.
++	OutboundModeRelay = "relay"
+ )
+ 
+ // MailboxServer configures the integrated mailbox, SMTP and IMAP services.
+@@ -33,6 +44,13 @@ var MailboxServer = struct {
+ 	PostmasterUser string `ini:"POSTMASTER_USER"`
+ 	CatchAllUser   string `ini:"CATCH_ALL_USER"`
+ 
++	OutboundMode        string        `ini:"OUTBOUND_MODE"`
++	OutboundHelo        string        `ini:"OUTBOUND_HELO"`
++	OutboundRequireTLS  bool          `ini:"OUTBOUND_REQUIRE_TLS"`
++	OutboundRetryMaxAge time.Duration `ini:"OUTBOUND_RETRY_MAX_AGE"`
++	OutboundRetryEvery  time.Duration `ini:"OUTBOUND_RETRY_EVERY"`
++	OutboundConcurrency int           `ini:"OUTBOUND_CONCURRENCY"`
++
+ 	DKIMEnabled                bool   `ini:"DKIM_ENABLED"`
+ 	DKIMDomain                 string `ini:"DKIM_DOMAIN"`
+ 	DKIMSelector               string `ini:"DKIM_SELECTOR"`
+@@ -56,6 +74,10 @@ var MailboxServer = struct {
+ 	MaxMessageSize:             25 * 1024 * 1024,
+ 	MaxRecipients:              100,
+ 	RelayEnabled:               true,
++	OutboundMode:               OutboundModeDirect,
++	OutboundRetryMaxAge:        72 * time.Hour,
++	OutboundRetryEvery:         5 * time.Minute,
++	OutboundConcurrency:        4,
+ 	DKIMSelector:               "gitea",
+ 	DKIMHeaderCanonicalization: "relaxed",
+ 	DKIMBodyCanonicalization:   "relaxed",
+@@ -84,6 +106,12 @@ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+ 	sec.Key("HOSTNAME").MustString(Domain)
+ 	sec.Key("POSTMASTER_USER").MustString("")
+ 	sec.Key("CATCH_ALL_USER").MustString("")
++	sec.Key("OUTBOUND_MODE").MustString(OutboundModeDirect)
++	sec.Key("OUTBOUND_HELO").MustString("")
++	sec.Key("OUTBOUND_REQUIRE_TLS").MustBool(false)
++	sec.Key("OUTBOUND_RETRY_MAX_AGE").MustDuration(72 * time.Hour)
++	sec.Key("OUTBOUND_RETRY_EVERY").MustDuration(5 * time.Minute)
++	sec.Key("OUTBOUND_CONCURRENCY").MustInt(4)
+ 	sec.Key("DKIM_ENABLED").MustBool(false)
+ 	sec.Key("DKIM_DOMAIN").MustString("")
+ 	sec.Key("DKIM_SELECTOR").MustString("gitea")
+@@ -107,6 +135,8 @@ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+ 	MailboxServer.IMAPSListen = strings.TrimSpace(MailboxServer.IMAPSListen)
+ 	MailboxServer.TLSCertFile = strings.TrimSpace(MailboxServer.TLSCertFile)
+ 	MailboxServer.TLSKeyFile = strings.TrimSpace(MailboxServer.TLSKeyFile)
++	MailboxServer.OutboundMode = strings.ToLower(strings.TrimSpace(MailboxServer.OutboundMode))
++	MailboxServer.OutboundHelo = strings.TrimSpace(MailboxServer.OutboundHelo)
+ 	MailboxServer.PostmasterUser = strings.ToLower(strings.TrimSpace(MailboxServer.PostmasterUser))
+ 	MailboxServer.CatchAllUser = strings.ToLower(strings.TrimSpace(MailboxServer.CatchAllUser))
+ 	MailboxServer.DKIMDomain = strings.ToLower(strings.TrimSpace(MailboxServer.DKIMDomain))
+@@ -129,4 +159,19 @@ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+ 	if MailboxServer.MaxRecipients <= 0 {
+ 		MailboxServer.MaxRecipients = 100
+ 	}
++	if MailboxServer.OutboundMode != OutboundModeRelay {
++		MailboxServer.OutboundMode = OutboundModeDirect
++	}
++	if MailboxServer.OutboundHelo == "" {
++		MailboxServer.OutboundHelo = MailboxServer.Hostname
++	}
++	if MailboxServer.OutboundRetryEvery < time.Minute {
++		MailboxServer.OutboundRetryEvery = time.Minute
++	}
++	if MailboxServer.OutboundRetryMaxAge <= 0 {
++		MailboxServer.OutboundRetryMaxAge = 72 * time.Hour
++	}
++	if MailboxServer.OutboundConcurrency <= 0 {
++		MailboxServer.OutboundConcurrency = 4
++	}
+ }
+diff --git a/routers/private/mail.go b/routers/private/mail.go
+index 684366a9dc..7061f579dd 100644
+--- a/routers/private/mail.go
++++ b/routers/private/mail.go
+@@ -12,7 +12,6 @@ import (
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/json"
+ 	"gitea.dev/modules/private"
+-	"gitea.dev/modules/setting"
+ 	"gitea.dev/services/context"
+ 	"gitea.dev/services/mailer"
+ 	sender_service "gitea.dev/services/mailer/sender"
+@@ -22,8 +21,10 @@ import (
+ //
+ // It doesn't wait before each message will be processed
+ func SendEmail(ctx *context.PrivateContext) {
+-	if setting.MailService == nil {
+-		ctx.PrivateInternalErrorf("Mail service is not enabled.")
++	if !mailer.MailEnabled() {
++		ctx.JSON(http.StatusInternalServerError, private.Response{
++			Err: "Mail service is not enabled.",
++		})
+ 		return
+ 	}
+ 
+diff --git a/routers/web/admin/users.go b/routers/web/admin/users.go
+index f9ae597527..af015e4807 100644
+--- a/routers/web/admin/users.go
++++ b/routers/web/admin/users.go
+@@ -97,7 +97,7 @@ func NewUser(ctx *context.Context) {
+ 	}
+ 	ctx.Data["Sources"] = sources
+ 
+-	ctx.Data["CanSendEmail"] = setting.MailService != nil
++	ctx.Data["CanSendEmail"] = mailer.MailEnabled()
+ 	ctx.HTML(http.StatusOK, tplUserNew)
+ }
+ 
+@@ -118,7 +118,7 @@ func NewUserPost(ctx *context.Context) {
+ 	}
+ 	ctx.Data["Sources"] = sources
+ 
+-	ctx.Data["CanSendEmail"] = setting.MailService != nil
++	ctx.Data["CanSendEmail"] = mailer.MailEnabled()
+ 
+ 	if ctx.HasError() {
+ 		ctx.HTML(http.StatusOK, tplUserNew)
+diff --git a/routers/web/auth/auth.go b/routers/web/auth/auth.go
+index 0256424d84..a310f3dd65 100644
+--- a/routers/web/auth/auth.go
++++ b/routers/web/auth/auth.go
+@@ -776,7 +776,7 @@ func Activate(ctx *context.Context) {
+ 			return
+ 		}
+ 
+-		if setting.MailService == nil || !setting.Service.RegisterEmailConfirm {
++		if !mailer.MailEnabled() || !setting.Service.RegisterEmailConfirm {
+ 			renderActivationPromptMessage(ctx, ctx.Tr("auth.disable_register_mail"))
+ 			return
+ 		}
+diff --git a/routers/web/auth/password.go b/routers/web/auth/password.go
+index bdc4a0396e..2acc74f7f9 100644
+--- a/routers/web/auth/password.go
++++ b/routers/web/auth/password.go
+@@ -33,7 +33,7 @@ var (
+ func ForgotPasswd(ctx *context.Context) {
+ 	ctx.Data["Title"] = ctx.Tr("auth.forgot_password_title")
+ 
+-	if setting.MailService == nil {
++	if !mailer.MailEnabled() {
+ 		log.Warn("no mail service configured")
+ 		ctx.Data["IsResetDisable"] = true
+ 		ctx.HTML(http.StatusOK, tplForgotPassword)
+@@ -50,7 +50,7 @@ func ForgotPasswd(ctx *context.Context) {
+ func ForgotPasswdPost(ctx *context.Context) {
+ 	ctx.Data["Title"] = ctx.Tr("auth.forgot_password_title")
+ 
+-	if setting.MailService == nil {
++	if !mailer.MailEnabled() {
+ 		ctx.NotFound(nil)
+ 		return
+ 	}
+diff --git a/routers/web/org/teams.go b/routers/web/org/teams.go
+index 233a8b1907..601ba316b9 100644
+--- a/routers/web/org/teams.go
++++ b/routers/web/org/teams.go
+@@ -29,6 +29,7 @@ import (
+ 	"gitea.dev/services/context"
+ 	"gitea.dev/services/convert"
+ 	"gitea.dev/services/forms"
++	"gitea.dev/services/mailer"
+ 	org_service "gitea.dev/services/org"
+ 	repo_service "gitea.dev/services/repository"
+ )
+@@ -174,7 +175,7 @@ func TeamsAction(ctx *context.Context) {
+ 		u, err = user_model.GetUserByName(ctx, uname)
+ 		if err != nil {
+ 			if user_model.IsErrUserNotExist(err) {
+-				if setting.MailService != nil && user_model.ValidateEmail(uname) == nil {
++				if mailer.MailEnabled() && user_model.ValidateEmail(uname) == nil {
+ 					if err := org_service.CreateTeamInvite(ctx, ctx.Doer, ctx.Org.Team, uname); err != nil {
+ 						if org_model.IsErrTeamInviteAlreadyExist(err) {
+ 							ctx.Flash.Error(ctx.Tr("form.duplicate_invite_to_team"))
+@@ -413,7 +414,7 @@ func TeamMembers(ctx *context.Context) {
+ 		return
+ 	}
+ 	ctx.Data["Invites"] = invites
+-	ctx.Data["IsEmailInviteEnabled"] = setting.MailService != nil
++	ctx.Data["IsEmailInviteEnabled"] = mailer.MailEnabled()
+ 
+ 	ctx.HTML(http.StatusOK, tplTeamMembers)
+ }
+diff --git a/services/mailbox/mailbox.go b/services/mailbox/mailbox.go
+index e4c794c438..3ec353bb10 100644
+--- a/services/mailbox/mailbox.go
++++ b/services/mailbox/mailbox.go
+@@ -256,6 +256,9 @@ type DeliveryOptions struct {
+ 	AllowRelay   bool
+ 	LocalFolder  string
+ 	SkipHandlers bool
++	// SenderID owns any delivery status notice raised for this message. Zero for
++	// mail this instance did not originate.
++	SenderID int64
+ }
+ 
+ // DeliverRaw stores all local recipient copies, dispatches tokenized Gitea replies,
+@@ -346,20 +349,8 @@ func DeliverRawWithOptions(ctx context.Context, envelopeFrom string, recipients
+ 	}
+ 
+ 	if len(remote) > 0 {
+-		if setting.MailService == nil {
+-			return nil, errors.New("cannot relay external mail: [mailer] is not enabled")
+-		}
+-		var relay sender_service.Sender
+-		switch setting.MailService.Protocol {
+-		case "sendmail":
+-			relay = &sender_service.SendmailSender{}
+-		case "dummy":
+-			relay = &sender_service.DummySender{}
+-		default:
+-			relay = &sender_service.SMTPSender{}
+-		}
+-		if err := relay.Send(envelopeFrom, remote, rawMessage(raw)); err != nil {
+-			return nil, fmt.Errorf("relay external mail: %w", err)
++		if err := SendRemote(ctx, opts.SenderID, envelopeFrom, remote, raw); err != nil {
++			return nil, err
+ 		}
+ 		result.RemoteUsers = len(remote)
+ 	}
+@@ -367,6 +358,34 @@ func DeliverRawWithOptions(ctx context.Context, envelopeFrom string, recipients
+ 	return result, nil
+ }
+ 
++// SendRemote hands a message to the configured outbound path. In direct mode it
++// is queued for delivery to the recipient's own MX, so no [mailer] transport is
++// needed; in relay mode it goes to the [mailer] transport as before.
++func SendRemote(ctx context.Context, senderID int64, envelopeFrom string, recipients []string, raw []byte) error {
++	if setting.MailboxServer.OutboundMode == setting.OutboundModeDirect {
++		if err := QueueOutbound(ctx, senderID, envelopeFrom, recipients, raw); err != nil {
++			return fmt.Errorf("queue external mail: %w", err)
++		}
++		return nil
++	}
++	if setting.MailService == nil {
++		return errors.New("cannot relay external mail: OUTBOUND_MODE is relay but [mailer] is not enabled")
++	}
++	var relay sender_service.Sender
++	switch setting.MailService.Protocol {
++	case "sendmail":
++		relay = &sender_service.SendmailSender{}
++	case "dummy":
++		relay = &sender_service.DummySender{}
++	default:
++		relay = &sender_service.SMTPSender{}
++	}
++	if err := relay.Send(envelopeFrom, recipients, rawMessage(raw)); err != nil {
++		return fmt.Errorf("relay external mail: %w", err)
++	}
++	return nil
++}
++
+ func StoreRaw(ctx context.Context, user *user_model.User, folder string, raw []byte, seen bool) (*mailbox_model.Message, error) {
+ 	env, err := enmime.ReadEnvelope(bytes.NewReader(raw))
+ 	if err != nil {
+@@ -539,7 +558,7 @@ func ComposeAndSend(ctx context.Context, user *user_model.User, to, cc, bcc []st
+ 	if err != nil {
+ 		return nil, fmt.Errorf("sign outgoing message with DKIM: %w", err)
+ 	}
+-	result, err := DeliverRaw(ctx, from, allRecipients, raw, true)
++	result, err := DeliverRawWithOptions(ctx, from, allRecipients, raw, DeliveryOptions{AllowRelay: true, SenderID: user.ID})
+ 	if err != nil {
+ 		return nil, err
+ 	}
+diff --git a/services/mailbox/outbound.go b/services/mailbox/outbound.go
+new file mode 100644
+index 0000000000..37c2c5e228
+--- /dev/null
++++ b/services/mailbox/outbound.go
+@@ -0,0 +1,436 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"context"
++	"crypto/tls"
++	"errors"
++	"fmt"
++	"net"
++	"sort"
++	"strings"
++	"sync"
++	"time"
++
++	mailbox_model "gitea.dev/models/mailbox"
++	user_model "gitea.dev/models/user"
++	"gitea.dev/modules/log"
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/timeutil"
++
++	"github.com/emersion/go-smtp"
++)
++
++const (
++	outboundDialTimeout = 30 * time.Second
++	outboundLookupLimit = 10 * time.Second
++	outboundBatchSize   = 32
++)
++
++// deliveryError separates a destination that may succeed later from one that
++// never will. Only permanent failures produce a bounce.
++type deliveryError struct {
++	permanent bool
++	code      int
++	err       error
++}
++
++func (e *deliveryError) Error() string { return e.err.Error() }
++func (e *deliveryError) Unwrap() error { return e.err }
++
++func temporaryFailure(code int, format string, args ...any) *deliveryError {
++	return &deliveryError{code: code, err: fmt.Errorf(format, args...)}
++}
++
++func permanentFailure(code int, format string, args ...any) *deliveryError {
++	return &deliveryError{permanent: true, code: code, err: fmt.Errorf(format, args...)}
++}
++
++// classifySMTPError maps a reply from the remote MTA onto our retry decision.
++// 5xx is permanent, 4xx is a deferral, and anything else (a dropped connection,
++// a DNS hiccup) is treated as temporary so the message is retried.
++func classifySMTPError(err error) *deliveryError {
++	if err == nil {
++		return nil
++	}
++	var smtpErr *smtp.SMTPError
++	if errors.As(err, &smtpErr) {
++		if smtpErr.Code >= 500 && smtpErr.Code < 600 {
++			return permanentFailure(smtpErr.Code, "%w", err)
++		}
++		return temporaryFailure(smtpErr.Code, "%w", err)
++	}
++	return temporaryFailure(0, "%w", err)
++}
++
++// lookupMailExchangers returns the hosts to try for a domain, most preferred
++// first. RFC 5321 section 5.1: a domain with no MX record falls back to its
++// address record, and a single "." MX explicitly refuses mail.
++func lookupMailExchangers(ctx context.Context, domain string) ([]string, error) {
++	domain = normalizeDomain(domain)
++	if domain == "" {
++		return nil, permanentFailure(0, "invalid recipient domain")
++	}
++	ctx, cancel := context.WithTimeout(ctx, outboundLookupLimit)
++	defer cancel()
++
++	records, err := net.DefaultResolver.LookupMX(ctx, domain)
++	if err != nil {
++		var dnsErr *net.DNSError
++		// A domain that resolves to nothing at all is a permanent failure; a
++		// timeout or server failure is not.
++		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
++			return implicitMailExchanger(ctx, domain)
++		}
++		if errors.As(err, &dnsErr) && dnsErr.IsTemporary {
++			return nil, temporaryFailure(0, "MX lookup for %s: %w", domain, err)
++		}
++		// Go reports "no MX record" as a not-found error on most resolvers, but
++		// some return an empty answer instead; fall back rather than defer.
++		return implicitMailExchanger(ctx, domain)
++	}
++	if len(records) == 0 {
++		return implicitMailExchanger(ctx, domain)
++	}
++
++	return sortMailExchangers(domain, records)
++}
++
++// sortMailExchangers orders MX hosts by preference and rejects a null MX.
++func sortMailExchangers(domain string, records []*net.MX) ([]string, error) {
++	sorted := make([]*net.MX, len(records))
++	copy(sorted, records)
++	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].Pref < sorted[j].Pref })
++
++	hosts := make([]string, 0, len(sorted))
++	for _, record := range sorted {
++		host := strings.TrimSuffix(strings.TrimSpace(record.Host), ".")
++		if host == "" {
++			// A null MX (RFC 7505) states the domain accepts no mail at all.
++			return nil, permanentFailure(0, "domain %s does not accept mail (null MX)", domain)
++		}
++		hosts = append(hosts, host)
++	}
++	if len(hosts) == 0 {
++		return nil, permanentFailure(0, "domain %s has no usable mail exchanger", domain)
++	}
++	return hosts, nil
++}
++
++func implicitMailExchanger(ctx context.Context, domain string) ([]string, error) {
++	addrs, err := net.DefaultResolver.LookupHost(ctx, domain)
++	if err != nil {
++		var dnsErr *net.DNSError
++		if errors.As(err, &dnsErr) && dnsErr.IsNotFound {
++			return nil, permanentFailure(0, "domain %s has no MX or address record", domain)
++		}
++		return nil, temporaryFailure(0, "address lookup for %s: %w", domain, err)
++	}
++	if len(addrs) == 0 {
++		return nil, permanentFailure(0, "domain %s has no MX or address record", domain)
++	}
++	return []string{domain}, nil
++}
++
++// outboundTLSConfig implements RFC 7435 opportunistic security. MX hosts very
++// often present certificates that do not match the name we looked up, so
++// requiring a valid chain by default would break normal delivery; encryption
++// without authentication is still strictly better than cleartext. Set
++// OUTBOUND_REQUIRE_TLS to demand a verified chain instead.
++func outboundTLSConfig(host string) *tls.Config {
++	return &tls.Config{
++		ServerName:         host,
++		InsecureSkipVerify: !setting.MailboxServer.OutboundRequireTLS, //nolint:gosec // opportunistic TLS, see comment
++		MinVersion:         tls.VersionTLS12,
++	}
++}
++
++// deliverToHost runs one SMTP conversation. A rejection of an individual
++// recipient is reported, but the message is still delivered to the rest.
++func deliverToHost(ctx context.Context, host, from string, recipients []string, raw []byte) error {
++	client, err := connectToHost(ctx, host)
++	if err != nil {
++		return err
++	}
++	defer client.Close()
++
++	if err := client.Mail(from, nil); err != nil {
++		return classifySMTPError(err)
++	}
++	accepted := 0
++	var lastRcptErr error
++	for _, recipient := range recipients {
++		if err := client.Rcpt(recipient, nil); err != nil {
++			lastRcptErr = err
++			log.Warn("Mailbox outbound: %s rejected recipient %s: %v", host, recipient, err)
++			continue
++		}
++		accepted++
++	}
++	if accepted == 0 {
++		if lastRcptErr != nil {
++			return classifySMTPError(lastRcptErr)
++		}
++		return permanentFailure(0, "no recipients accepted by %s", host)
++	}
++
++	writer, err := client.Data()
++	if err != nil {
++		return classifySMTPError(err)
++	}
++	if _, err := writer.Write(raw); err != nil {
++		return temporaryFailure(0, "write message to %s: %w", host, err)
++	}
++	if err := writer.Close(); err != nil {
++		return classifySMTPError(err)
++	}
++	_ = client.Quit()
++	return nil
++}
++
++// connectToHost opens an SMTP session, preferring STARTTLS. go-smtp only exposes
++// the upgrade through NewClientStartTLS, which greets as "localhost" and fails
++// outright when the peer has no STARTTLS, so a peer without it costs a second
++// connection. The EHLO that names this host is the one sent inside the TLS
++// session, which is the greeting that governs the mail transaction.
++func connectToHost(ctx context.Context, host string) (*smtp.Client, error) {
++	conn, err := dialHost(ctx, host)
++	if err != nil {
++		return nil, err
++	}
++	client, tlsErr := smtp.NewClientStartTLS(conn, outboundTLSConfig(host))
++	if tlsErr == nil {
++		if err := client.Hello(setting.MailboxServer.OutboundHelo); err != nil {
++			client.Close()
++			return nil, classifySMTPError(err)
++		}
++		return client, nil
++	}
++	if setting.MailboxServer.OutboundRequireTLS {
++		return nil, temporaryFailure(0, "STARTTLS with %s failed and OUTBOUND_REQUIRE_TLS is set: %w", host, tlsErr)
++	}
++
++	log.Debug("Mailbox outbound: %s has no usable STARTTLS, falling back to cleartext: %v", host, tlsErr)
++	conn, err = dialHost(ctx, host)
++	if err != nil {
++		return nil, err
++	}
++	client = smtp.NewClient(conn)
++	if err := client.Hello(setting.MailboxServer.OutboundHelo); err != nil {
++		client.Close()
++		return nil, classifySMTPError(err)
++	}
++	return client, nil
++}
++
++func dialHost(ctx context.Context, host string) (net.Conn, error) {
++	addr := net.JoinHostPort(host, "25")
++	dialer := &net.Dialer{Timeout: outboundDialTimeout}
++	conn, err := dialer.DialContext(ctx, "tcp", addr)
++	if err != nil {
++		return nil, temporaryFailure(0, "connect to %s: %w", addr, err)
++	}
++	return conn, nil
++}
++
++// deliverDirect tries each MX in preference order. A permanent rejection stops
++// the walk, because a lower-priority host would reject it for the same reason.
++func deliverDirect(ctx context.Context, domain, from string, recipients []string, raw []byte) error {
++	hosts, err := lookupMailExchangers(ctx, domain)
++	if err != nil {
++		return err
++	}
++	var lastErr error
++	for _, host := range hosts {
++		err := deliverToHost(ctx, host, from, recipients, raw)
++		if err == nil {
++			log.Info("Mailbox outbound: delivered to %s via %s (%d recipients)", domain, host, len(recipients))
++			return nil
++		}
++		lastErr = err
++		var delivery *deliveryError
++		if errors.As(err, &delivery) && delivery.permanent {
++			return err
++		}
++		log.Warn("Mailbox outbound: %s did not accept mail for %s: %v", host, domain, err)
++	}
++	if lastErr == nil {
++		lastErr = temporaryFailure(0, "no mail exchanger available for %s", domain)
++	}
++	return lastErr
++}
++
++// QueueOutbound stores remote recipients for delivery, grouped by destination
++// domain. Delivery itself happens on the retry loop so a slow or unreachable
++// destination never blocks the SMTP session or the web request that produced it.
++func QueueOutbound(ctx context.Context, userID int64, from string, recipients []string, raw []byte) error {
++	byDomain, err := groupByDomain(recipients)
++	if err != nil {
++		return err
++	}
++	for domain, domainRecipients := range byDomain {
++		out := &mailbox_model.Outbound{
++			UserID:      userID,
++			Domain:      domain,
++			FromAddress: from,
++			Raw:         raw,
++			NextAttempt: timeutil.TimeStampNow(),
++		}
++		out.SetRecipients(domainRecipients)
++		if err := mailbox_model.InsertOutbound(ctx, out); err != nil {
++			return err
++		}
++	}
++	return nil
++}
++
++// groupByDomain buckets recipients by destination domain, which is the unit one
++// SMTP conversation can deliver.
++func groupByDomain(recipients []string) (map[string][]string, error) {
++	byDomain := make(map[string][]string)
++	for _, recipient := range recipients {
++		_, domain, ok := strings.Cut(strings.ToLower(strings.TrimSpace(recipient)), "@")
++		if !ok || domain == "" {
++			return nil, fmt.Errorf("outbound recipient has no domain: %s", recipient)
++		}
++		byDomain[domain] = append(byDomain[domain], recipient)
++	}
++	return byDomain, nil
++}
++
++// retryDelay backs off roughly like a conventional MTA: a few quick attempts,
++// then widening intervals up to an hour.
++func retryDelay(attempts int) time.Duration {
++	switch {
++	case attempts <= 1:
++		return 5 * time.Minute
++	case attempts == 2:
++		return 15 * time.Minute
++	case attempts == 3:
++		return 30 * time.Minute
++	default:
++		return time.Hour
++	}
++}
++
++func processOutbound(ctx context.Context, out *mailbox_model.Outbound) {
++	recipients := out.RecipientList()
++	if len(recipients) == 0 {
++		_ = mailbox_model.DeleteOutbound(ctx, out.ID)
++		return
++	}
++
++	err := deliverDirect(ctx, out.Domain, out.FromAddress, recipients, out.Raw)
++	if err == nil {
++		if err := mailbox_model.DeleteOutbound(ctx, out.ID); err != nil {
++			log.Error("Mailbox outbound: cannot dequeue delivered message %d: %v", out.ID, err)
++		}
++		return
++	}
++
++	attempts := out.Attempts + 1
++	var delivery *deliveryError
++	permanent := errors.As(err, &delivery) && delivery.permanent
++	expired := time.Since(out.CreatedUnix.AsTime()) > setting.MailboxServer.OutboundRetryMaxAge
++	code := 0
++	if delivery != nil {
++		code = delivery.code
++	}
++
++	if permanent || expired {
++		reason := "permanently rejected"
++		if !permanent {
++			reason = fmt.Sprintf("undeliverable after %s", setting.MailboxServer.OutboundRetryMaxAge)
++		}
++		log.Error("Mailbox outbound: giving up on %s for %v (%s): %v", out.Domain, recipients, reason, err)
++		notifyOutboundFailure(ctx, out, recipients, reason, err)
++		if err := mailbox_model.DeleteOutbound(ctx, out.ID); err != nil {
++			log.Error("Mailbox outbound: cannot dequeue failed message %d: %v", out.ID, err)
++		}
++		return
++	}
++
++	next := timeutil.TimeStamp(time.Now().Add(retryDelay(attempts)).Unix())
++	if err := mailbox_model.RescheduleOutbound(ctx, out.ID, attempts, code, err.Error(), next); err != nil {
++		log.Error("Mailbox outbound: cannot reschedule message %d: %v", out.ID, err)
++	}
++}
++
++// notifyOutboundFailure files a delivery status notice into the sender's own
++// mailbox. It replaces the bounce an edge MTA would normally return, so a user
++// still learns that their message never arrived.
++func notifyOutboundFailure(ctx context.Context, out *mailbox_model.Outbound, recipients []string, reason string, cause error) {
++	if out.UserID == 0 {
++		return
++	}
++	user, err := user_model.GetUserByID(ctx, out.UserID)
++	if err != nil {
++		log.Warn("Mailbox outbound: cannot notify sender %d: %v", out.UserID, err)
++		return
++	}
++	body := fmt.Sprintf("Delivery to the following recipients failed permanently:\r\n\r\n%s\r\n\r\nReason: %s\r\nDetail: %s\r\n",
++		strings.Join(recipients, "\r\n"), reason, cause)
++	notice := buildDeliveryStatusNotice(user, out, body)
++	if _, err := StoreRaw(ctx, user, mailbox_model.FolderInbox, notice, false); err != nil {
++		log.Error("Mailbox outbound: cannot store delivery failure notice for user %d: %v", out.UserID, err)
++	}
++}
++
++func buildDeliveryStatusNotice(user *user_model.User, out *mailbox_model.Outbound, body string) []byte {
++	header := fmt.Sprintf("From: Mail Delivery Subsystem <postmaster@%s>\r\n"+
++		"To: %s\r\n"+
++		"Subject: Undelivered mail returned to sender\r\n"+
++		"Date: %s\r\n"+
++		"Message-ID: <dsn-%d-%d@%s>\r\n"+
++		"Auto-Submitted: auto-replied\r\n"+
++		"Content-Type: text/plain; charset=utf-8\r\n"+
++		"\r\n",
++		Domain(), AddressForUser(user), time.Now().Format(time.RFC1123Z), out.ID, time.Now().UnixNano(), Domain())
++	return []byte(header + body)
++}
++
++// RunOutboundQueue drains due deliveries until the context is cancelled.
++func RunOutboundQueue(ctx context.Context) {
++	ticker := time.NewTicker(setting.MailboxServer.OutboundRetryEvery)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++			drainOutboundQueue(ctx)
++		}
++	}
++}
++
++func drainOutboundQueue(ctx context.Context) {
++	// The lease pushes a claimed row past the next tick, so a delivery that
++	// outlives one interval is not started twice.
++	lease := timeutil.TimeStamp(time.Now().Add(setting.MailboxServer.OutboundRetryEvery + outboundDialTimeout).Unix())
++	batch, err := mailbox_model.ClaimDueOutbound(ctx, outboundBatchSize, lease)
++	if err != nil {
++		log.Error("Mailbox outbound: cannot read the queue: %v", err)
++		return
++	}
++	if len(batch) == 0 {
++		return
++	}
++
++	sem := make(chan struct{}, setting.MailboxServer.OutboundConcurrency)
++	var wg sync.WaitGroup
++	for _, out := range batch {
++		if ctx.Err() != nil {
++			return
++		}
++		wg.Add(1)
++		go func(out *mailbox_model.Outbound) {
++			defer wg.Done()
++			sem <- struct{}{}
++			defer func() { <-sem }()
++			processOutbound(ctx, out)
++		}(out)
++	}
++	wg.Wait()
++}
+diff --git a/services/mailbox/outbound_test.go b/services/mailbox/outbound_test.go
+new file mode 100644
+index 0000000000..af46622be9
+--- /dev/null
++++ b/services/mailbox/outbound_test.go
+@@ -0,0 +1,106 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"errors"
++	"net"
++	"testing"
++	"time"
++
++	"github.com/emersion/go-smtp"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestClassifySMTPError(t *testing.T) {
++	assert.Nil(t, classifySMTPError(nil))
++
++	// 5xx means the destination will never accept this message.
++	permanent := classifySMTPError(&smtp.SMTPError{Code: 550, Message: "no such user"})
++	require.NotNil(t, permanent)
++	assert.True(t, permanent.permanent)
++	assert.Equal(t, 550, permanent.code)
++
++	// 4xx is a deferral and must be retried.
++	temporary := classifySMTPError(&smtp.SMTPError{Code: 451, Message: "try later"})
++	require.NotNil(t, temporary)
++	assert.False(t, temporary.permanent)
++	assert.Equal(t, 451, temporary.code)
++
++	// A dropped connection is not a verdict on the message.
++	network := classifySMTPError(errors.New("connection reset by peer"))
++	require.NotNil(t, network)
++	assert.False(t, network.permanent)
++	assert.Equal(t, 0, network.code)
++}
++
++func TestClassifySMTPErrorUnwraps(t *testing.T) {
++	// The delivery loop inspects errors with errors.As through wrapping.
++	wrapped := temporaryFailure(0, "connect to mx.example.com: %w", &smtp.SMTPError{Code: 550, Message: "denied"})
++	var delivery *deliveryError
++	require.True(t, errors.As(error(wrapped), &delivery))
++	assert.False(t, delivery.permanent)
++}
++
++func TestSortMailExchangers(t *testing.T) {
++	hosts, err := sortMailExchangers("example.com", []*net.MX{
++		{Host: "backup.example.com.", Pref: 20},
++		{Host: "primary.example.com.", Pref: 10},
++		{Host: "third.example.com.", Pref: 30},
++	})
++	require.NoError(t, err)
++	// Lowest preference first, trailing dots stripped.
++	assert.Equal(t, []string{"primary.example.com", "backup.example.com", "third.example.com"}, hosts)
++}
++
++func TestSortMailExchangersEqualPreferenceIsStable(t *testing.T) {
++	hosts, err := sortMailExchangers("example.com", []*net.MX{
++		{Host: "a.example.com.", Pref: 10},
++		{Host: "b.example.com.", Pref: 10},
++	})
++	require.NoError(t, err)
++	assert.Equal(t, []string{"a.example.com", "b.example.com"}, hosts)
++}
++
++func TestSortMailExchangersNullMX(t *testing.T) {
++	// RFC 7505: "." means the domain accepts no mail, so never retry it.
++	_, err := sortMailExchangers("example.com", []*net.MX{{Host: ".", Pref: 0}})
++	require.Error(t, err)
++	var delivery *deliveryError
++	require.True(t, errors.As(err, &delivery))
++	assert.True(t, delivery.permanent)
++
++	_, err = sortMailExchangers("example.com", nil)
++	assert.Error(t, err)
++}
++
++func TestGroupByDomain(t *testing.T) {
++	grouped, err := groupByDomain([]string{
++		"a@example.com", "b@example.com", "c@Example.ORG", " d@example.com ",
++	})
++	require.NoError(t, err)
++	assert.Len(t, grouped, 2)
++	assert.Len(t, grouped["example.com"], 3)
++	assert.Len(t, grouped["example.org"], 1)
++
++	_, err = groupByDomain([]string{"not-an-address"})
++	assert.ErrorContains(t, err, "no domain")
++}
++
++func TestRetryDelayBacksOff(t *testing.T) {
++	// Early attempts retry quickly, then widen and settle at an hour.
++	assert.Equal(t, 5*time.Minute, retryDelay(1))
++	assert.Equal(t, 15*time.Minute, retryDelay(2))
++	assert.Equal(t, 30*time.Minute, retryDelay(3))
++	assert.Equal(t, time.Hour, retryDelay(4))
++	assert.Equal(t, time.Hour, retryDelay(50))
++
++	previous := time.Duration(0)
++	for attempt := 1; attempt <= 10; attempt++ {
++		current := retryDelay(attempt)
++		assert.GreaterOrEqual(t, current, previous, "backoff must never shrink")
++		previous = current
++	}
++}
+diff --git a/services/mailbox/server.go b/services/mailbox/server.go
+index ed9bca7a84..e49b39b099 100644
+--- a/services/mailbox/server.go
++++ b/services/mailbox/server.go
+@@ -9,6 +9,7 @@ import (
+ 	"fmt"
+ 	"net"
+ 
++	"gitea.dev/modules/log"
+ 	"gitea.dev/modules/setting"
+ )
+ 
+@@ -63,5 +64,9 @@ func Init(ctx context.Context) error {
+ 	if err := initIMAP(ctx, tlsConfig); err != nil {
+ 		return err
+ 	}
++	if setting.MailboxServer.OutboundMode == setting.OutboundModeDirect {
++		log.Info("Mailbox outbound delivery is direct-to-MX; [mailer] is not required")
++		go RunOutboundQueue(ctx)
++	}
+ 	return nil
+ }
+diff --git a/services/mailbox/smtp.go b/services/mailbox/smtp.go
+index f7909875cd..bd0ab427c0 100644
+--- a/services/mailbox/smtp.go
++++ b/services/mailbox/smtp.go
+@@ -203,6 +203,9 @@ func (s *smtpSession) Data(r io.Reader) error {
+ 	remote := remoteIP(s.remoteAddr())
+ 	_, tlsActive := s.conn.TLSConnectionState()
+ 	deliveryOptions := DeliveryOptions{AllowRelay: s.user != nil && setting.MailboxServer.RelayEnabled}
++	if s.user != nil {
++		deliveryOptions.SenderID = s.user.ID
++	}
+ 
+ 	if s.user == nil {
+ 		auth := authenticateIncoming(s.ctx, remote, s.conn.Hostname(), s.mailFrom, raw)
+diff --git a/services/mailer/mail.go b/services/mailer/mail.go
+index 4bbb8b15ed..09460ea271 100644
+--- a/services/mailer/mail.go
++++ b/services/mailer/mail.go
+@@ -39,7 +39,7 @@ func LoadedTemplates() *templates.MailRender {
+ 
+ // SendTestMail sends a test mail
+ func SendTestMail(email string) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+diff --git a/services/mailer/mail_comment.go b/services/mailer/mail_comment.go
+index 2e564fcb8f..a846091909 100644
+--- a/services/mailer/mail_comment.go
++++ b/services/mailer/mail_comment.go
+@@ -11,12 +11,11 @@ import (
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/container"
+ 	"gitea.dev/modules/log"
+-	"gitea.dev/modules/setting"
+ )
+ 
+ // MailParticipantsComment sends new comment emails to repository watchers and mentioned people.
+ func MailParticipantsComment(ctx context.Context, c *issues_model.Comment, opType activities_model.ActionType, issue *issues_model.Issue, mentions []*user_model.User) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+@@ -40,7 +39,7 @@ func MailParticipantsComment(ctx context.Context, c *issues_model.Comment, opTyp
+ 
+ // MailMentionsComment sends email to users mentioned in a code comment
+ func MailMentionsComment(ctx context.Context, pr *issues_model.PullRequest, c *issues_model.Comment, mentions []*user_model.User) (err error) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+diff --git a/services/mailer/mail_issue.go b/services/mailer/mail_issue.go
+index c5e0e039f8..dd17a3fd9c 100644
+--- a/services/mailer/mail_issue.go
++++ b/services/mailer/mail_issue.go
+@@ -15,7 +15,6 @@ import (
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/container"
+ 	"gitea.dev/modules/log"
+-	"gitea.dev/modules/setting"
+ 	"gitea.dev/modules/util"
+ )
+ 
+@@ -165,7 +164,7 @@ func mailIssueCommentBatch(ctx context.Context, comment *mailComment, users []*u
+ // MailParticipants sends new issue thread created emails to repository watchers
+ // and mentioned people.
+ func MailParticipants(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, opType activities_model.ActionType, mentions []*user_model.User) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+@@ -193,7 +192,7 @@ func MailParticipants(ctx context.Context, issue *issues_model.Issue, doer *user
+ 
+ // SendIssueAssignedMail composes and sends issue assigned email
+ func SendIssueAssignedMail(ctx context.Context, issue *issues_model.Issue, doer *user_model.User, content string, comment *issues_model.Comment, recipients []*user_model.User) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+diff --git a/services/mailer/mail_release.go b/services/mailer/mail_release.go
+index 8b19916a06..2bd928ba73 100644
+--- a/services/mailer/mail_release.go
++++ b/services/mailer/mail_release.go
+@@ -30,7 +30,7 @@ func generateMessageIDForRelease(release *repo_model.Release) string {
+ 
+ // MailNewRelease send new release notify to all repo watchers.
+ func MailNewRelease(ctx context.Context, rel *repo_model.Release) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return
+ 	}
+diff --git a/services/mailer/mail_repo.go b/services/mailer/mail_repo.go
+index 2631a5c6e2..dfff42bfd2 100644
+--- a/services/mailer/mail_repo.go
++++ b/services/mailer/mail_repo.go
+@@ -25,7 +25,7 @@ const (
+ 
+ // SendRepoTransferNotifyMail triggers a notification e-mail when a pending repository transfer was created
+ func SendRepoTransferNotifyMail(ctx context.Context, doer, newOwner *user_model.User, repo *repo_model.Repository) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return nil
+ 	}
+@@ -98,7 +98,7 @@ func sendRepoTransferNotifyMailPerLang(lang string, newOwner, doer *user_model.U
+ 
+ // SendCollaboratorMail sends mail notification to new collaborator.
+ func SendCollaboratorMail(u, doer *user_model.User, repo *repo_model.Repository) {
+-	if setting.MailService == nil || !u.IsActive {
++	if !MailEnabled() || !u.IsActive {
+ 		return
+ 	}
+ 	locale := translation.NewLocale(u.Language)
+diff --git a/services/mailer/mail_team_invite.go b/services/mailer/mail_team_invite.go
+index 6d016ae81b..f393238d4a 100644
+--- a/services/mailer/mail_team_invite.go
++++ b/services/mailer/mail_team_invite.go
+@@ -23,7 +23,7 @@ const tplTeamInviteMail templates.TplName = "org/team_invite"
+ 
+ // MailTeamInvite sends team invites
+ func MailTeamInvite(ctx context.Context, inviter *user_model.User, team *org_model.Team, invite *org_model.TeamInvite) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		return nil
+ 	}
+ 
+diff --git a/services/mailer/mail_user.go b/services/mailer/mail_user.go
+index 504b62e00b..8b4a757f18 100644
+--- a/services/mailer/mail_user.go
++++ b/services/mailer/mail_user.go
+@@ -50,7 +50,7 @@ func sendUserMail(language string, u *user_model.User, tpl templates.TplName, co
+ 
+ // SendActivateAccountMail sends an activation mail to the user (new user registration)
+ func SendActivateAccountMail(locale translation.Locale, u *user_model.User) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return
+ 	}
+@@ -60,7 +60,7 @@ func SendActivateAccountMail(locale translation.Locale, u *user_model.User) {
+ 
+ // SendResetPasswordMail sends a password reset mail to the user
+ func SendResetPasswordMail(u *user_model.User) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return
+ 	}
+@@ -71,7 +71,7 @@ func SendResetPasswordMail(u *user_model.User) {
+ 
+ // SendActivateEmailMail sends confirmation email to confirm new email address
+ func SendActivateEmailMail(u *user_model.User, email string) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		// No mail service configured
+ 		return
+ 	}
+@@ -101,7 +101,7 @@ func SendActivateEmailMail(u *user_model.User, email string) {
+ 
+ // SendRegisterNotifyMail triggers a notify e-mail by admin created a account.
+ func SendRegisterNotifyMail(u *user_model.User) {
+-	if setting.MailService == nil || !u.IsActive {
++	if !MailEnabled() || !u.IsActive {
+ 		// No mail service configured OR user is inactive
+ 		return
+ 	}
+diff --git a/services/mailer/mail_workflow_run.go b/services/mailer/mail_workflow_run.go
+index aa2827bfa4..550f63330b 100644
+--- a/services/mailer/mail_workflow_run.go
++++ b/services/mailer/mail_workflow_run.go
+@@ -150,7 +150,7 @@ func composeAndSendActionsWorkflowRunStatusEmail(ctx context.Context, repo *repo
+ }
+ 
+ func MailActionsTrigger(ctx context.Context, recipient *user_model.User, repo *repo_model.Repository, run *actions_model.ActionRun) error {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		return nil
+ 	}
+ 	if !run.Status.IsDone() || run.Status.IsSkipped() {
+diff --git a/services/mailer/mailbox_sender.go b/services/mailer/mailbox_sender.go
+index 5bc8e80644..739d0282fb 100644
+--- a/services/mailer/mailbox_sender.go
++++ b/services/mailer/mailbox_sender.go
+@@ -19,6 +19,15 @@ type mailboxAwareSender struct {
+ 	upstream sender_service.Sender
+ }
+ 
++// sendUpstream hands a message to the [mailer] transport, which is absent when
++// the instance relies solely on the integrated mailbox server.
++func (s *mailboxAwareSender) sendUpstream(from string, to []string, msg io.WriterTo) error {
++	if s.upstream == nil {
++		return fmt.Errorf("cannot send mail to %v: no [mailer] transport is configured", to)
++	}
++	return s.upstream.Send(from, to, msg)
++}
++
+ type mailboxRawMessage []byte
+ 
+ func (m mailboxRawMessage) WriteTo(w io.Writer) (int64, error) {
+@@ -28,7 +37,7 @@ func (m mailboxRawMessage) WriteTo(w io.Writer) (int64, error) {
+ 
+ func (s *mailboxAwareSender) Send(from string, to []string, msg io.WriterTo) error {
+ 	if !setting.MailboxServer.Enabled || len(to) == 0 {
+-		return s.upstream.Send(from, to, msg)
++		return s.sendUpstream(from, to, msg)
+ 	}
+ 	var raw bytes.Buffer
+ 	if _, err := msg.WriteTo(&raw); err != nil {
+@@ -56,7 +65,13 @@ func (s *mailboxAwareSender) Send(from string, to []string, msg io.WriterTo) err
+ 	// Relay first. Local delivery is Message-ID de-duplicated, so a queue retry
+ 	// after a partial failure cannot create repeated local copies.
+ 	if len(remote) > 0 {
+-		if err := s.upstream.Send(from, remote, wire); err != nil {
++		if setting.MailboxServer.OutboundMode == setting.OutboundModeDirect {
++			// Direct mode owns remote delivery, including its own retries, so the
++			// [mailer] transport is not consulted at all.
++			if err := mailbox_service.SendRemote(s.ctx, 0, from, remote, signedRaw); err != nil {
++				return err
++			}
++		} else if err := s.sendUpstream(from, remote, wire); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/services/mailer/mailer.go b/services/mailer/mailer.go
+index df706da3d5..2934acc9a1 100644
+--- a/services/mailer/mailer.go
++++ b/services/mailer/mailer.go
+@@ -21,12 +21,20 @@ var mailQueue *queue.WorkerPoolQueue[*sender_service.Message]
+ // sender sender for sending mail synchronously
+ var sender sender_service.Sender
+ 
++// MailEnabled reports whether Gitea can send mail at all, through either the
++// [mailer] transport or the integrated mailbox server.
++func MailEnabled() bool {
++	return setting.MailService != nil || setting.MailboxServer.Enabled
++}
++
+ // NewContext start mail queue service
+ func NewContext(ctx context.Context) {
+ 	// Need to check if mailQueue is nil because in during reinstall (user had installed
+ 	// before but switched install lock off), this function will be called again
+ 	// while mail queue is already processing tasks, and produces a race condition.
+-	if setting.MailService == nil || mailQueue != nil {
++	// The integrated mailbox server can carry Gitea's own mail on its own, so the
++	// queue also runs when only [mailbox] is configured.
++	if !MailEnabled() || mailQueue != nil {
+ 		return
+ 	}
+ 
+@@ -34,13 +42,15 @@ func NewContext(ctx context.Context) {
+ 		notify_service.RegisterNotifier(NewNotifier())
+ 	}
+ 
+-	switch setting.MailService.Protocol {
+-	case "sendmail":
+-		sender = &sender_service.SendmailSender{}
+-	case "dummy":
+-		sender = &sender_service.DummySender{}
+-	default:
+-		sender = &sender_service.SMTPSender{}
++	if setting.MailService != nil {
++		switch setting.MailService.Protocol {
++		case "sendmail":
++			sender = &sender_service.SendmailSender{}
++		case "dummy":
++			sender = &sender_service.DummySender{}
++		default:
++			sender = &sender_service.SMTPSender{}
++		}
+ 	}
+ 
+ 	if setting.MailboxServer.Enabled {
+@@ -71,7 +81,7 @@ func NewContext(ctx context.Context) {
+ var SendAsync = sendAsync
+ 
+ func sendAsync(msgs ...*sender_service.Message) {
+-	if setting.MailService == nil {
++	if !MailEnabled() {
+ 		log.Error("Mailer: SendAsync is being invoked but mail service hasn't been initialized")
+ 		return
+ 	}
+-- 
+2.55.0
+

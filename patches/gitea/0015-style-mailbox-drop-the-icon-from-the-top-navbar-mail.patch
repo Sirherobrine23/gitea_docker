@@ -1,0 +1,31 @@
+From a100c66a1fb0a6087087c81ef585f5b2cc58e22a Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Wed, 19 Aug 2026 13:27:43 +0000
+Subject: [PATCH 15/17] style(mailbox): drop the icon from the top navbar mail
+ link
+
+The neighbouring top-level links (Issues, Pull Requests, Milestones, Explore)
+are text only, so the mail entry was the odd one out.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ templates/base/head_navbar.tmpl | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/templates/base/head_navbar.tmpl b/templates/base/head_navbar.tmpl
+index 2a541f9a78..60fb46ae8a 100644
+--- a/templates/base/head_navbar.tmpl
++++ b/templates/base/head_navbar.tmpl
+@@ -28,7 +28,7 @@
+ 			{{end}}
+ 			<a class="item{{if .PageIsExplore}} active{{end}}" href="{{AppSubUrl}}/explore/repos">{{ctx.Locale.Tr "explore_title"}}</a>
+ 			{{if .MailboxEnabled}}
+-				<a class="item{{if .PageIsMailbox}} active{{end}}" href="{{AppSubUrl}}/mail">{{svg "octicon-mail"}} {{ctx.Locale.Tr "mailbox.title"}}</a>
++				<a class="item{{if .PageIsMailbox}} active{{end}}" href="{{AppSubUrl}}/mail">{{ctx.Locale.Tr "mailbox.title"}}</a>
+ 			{{end}}
+ 		{{else if .IsLandingPageOrganizations}}
+ 			<a class="item{{if .PageIsExplore}} active{{end}}" href="{{AppSubUrl}}/explore/organizations">{{ctx.Locale.Tr "explore_title"}}</a>
+-- 
+2.55.0
+

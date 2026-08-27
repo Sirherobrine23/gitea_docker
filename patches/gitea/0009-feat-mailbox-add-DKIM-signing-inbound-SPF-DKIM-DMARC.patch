@@ -1,0 +1,2364 @@
+From cc48073ce154ce743cd940920b0aae53317971fc Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 18 Aug 2026 21:54:16 +0000
+Subject: [PATCH 09/17] feat(mailbox): add DKIM signing, inbound SPF/DKIM/DMARC
+ and server hardening
+
+Builds on the integrated mailbox server to replace the external
+postfix/dovecot/opendkim container, so a Gitea instance can host its own
+mail without a separate MTA.
+
+Sender authentication:
+- sign outbound mail with DKIM (RSA PKCS#1/PKCS#8, Ed25519 PKCS#8) across
+  the webmail, authenticated submission and the [mailer] queue paths, so
+  local and relayed copies carry the same signature
+- authenticate inbound Internet mail with SPF, DKIM and DMARC, record the
+  outcome in Authentication-Results, and honour the published policy:
+  reject on p=reject, file into Junk on p=quarantine, defer on tempfail
+- quarantined mail is kept out of the tokenized reply-by-email handler so
+  it cannot mutate an issue or pull request
+
+Wiring the feature into the tree:
+- break the services/mailer -> services/mailbox -> services/auth import
+  cycle by injecting the password authenticator from routers/init
+- resolve a builder.Cond assignment, two untyped authres constants and two
+  non-constant format strings that failed the build and go vet
+- go mod tidy, which also records the whois dependency that
+  modules/setting/blockers.go already imported
+
+SMTP intake hardening:
+- read command and DATA lines through a bounded reader; the previous
+  length check ran after bufio had already buffered the whole line, so a
+  peer that never sent a newline could exhaust memory on port 25
+- strip one leading dot from every DATA line per RFC 5321 4.5.2 rather
+  than only from lines starting with two dots
+- remove exactly one line terminator instead of trimming every trailing
+  CR and LF, which altered the bytes DKIM hashes
+
+Recipient resolution:
+- match the account name before aliases so an account registered after a
+  colliding alias cannot have its mail delivered to the alias owner
+- add POSTMASTER_USER for the RFC 2142 postmaster and abuse addresses,
+  and CATCH_ALL_USER for the postfix catch-all behaviour; both default to
+  empty, which keeps rejecting unknown recipients
+
+IMAP and web list no longer load every raw message blob to list a folder;
+the wire bytes are fetched only for the commands that need them.
+
+Also localizes the webmail templates, documents every [mailbox] setting in
+app.example.ini, and covers DKIM sign/verify round trips, DMARC alignment,
+SMTP path parsing and DATA transparency with unit tests.
+
+Assisted-by: Claude Code:claude-opus-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ custom/conf/app.example.ini       |  81 +++++
+ docs/mailbox-server.md            |  80 ++++-
+ go.mod                            |   6 +-
+ go.sum                            |  11 +-
+ models/mailbox/mailbox.go         |  32 +-
+ models/mailbox/mailbox_test.go    |  64 ++++
+ modules/setting/mailbox.go        |  68 +++-
+ options/locale/locale_en-US.json  |  32 ++
+ routers/init.go                   |   5 +
+ routers/web/mailbox/mailbox.go    |   3 +-
+ services/mailbox/auth.go          | 520 ++++++++++++++++++++++++++++++
+ services/mailbox/auth_test.go     | 238 ++++++++++++++
+ services/mailbox/imap.go          |  40 ++-
+ services/mailbox/mailbox.go       | 137 ++++++--
+ services/mailbox/server.go        |   4 +
+ services/mailbox/smtp.go          | 136 +++++++-
+ services/mailbox/smtp_test.go     | 122 +++++++
+ services/mailer/mailbox_sender.go |   8 +-
+ templates/base/head_navbar.tmpl   |   2 +-
+ templates/mailbox/compose.tmpl    |  20 +-
+ templates/mailbox/list.tmpl       |  10 +-
+ templates/mailbox/settings.tmpl   |  22 +-
+ templates/mailbox/sidebar.tmpl    |   4 +-
+ templates/mailbox/view.tmpl       |  18 +-
+ 24 files changed, 1557 insertions(+), 106 deletions(-)
+ create mode 100644 models/mailbox/mailbox_test.go
+ create mode 100644 services/mailbox/auth.go
+ create mode 100644 services/mailbox/auth_test.go
+ create mode 100644 services/mailbox/smtp_test.go
+
+diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
+index 86631be700..104598c6f9 100644
+--- a/custom/conf/app.example.ini
++++ b/custom/conf/app.example.ini
+@@ -1945,6 +1945,87 @@ LEVEL = Info
+ ;; Maximum size of a message to handle. Bigger messages are ignored. Set to 0 to allow every size.
+ ;MAXIMUM_MESSAGE_SIZE = 10485760
+ 
++;;
++;; Deliver tokenized reply-by-email addresses through the integrated mailbox SMTP
++;; listener instead of polling an external IMAP account. Requires [mailbox] ENABLED.
++;LOCAL_DELIVERY = false
++
++;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
++;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
++;[mailbox]
++;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
++;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
++;;
++;; Enable the integrated mailbox server: SMTP, IMAP and the webmail UI.
++;; Each active individual account then owns <username>@DOMAIN.
++;ENABLED = false
++;;
++;; Mail domain hosted by this instance. Defaults to the server DOMAIN.
++;DOMAIN =
++;;
++;; Hostname announced in SMTP banners, EHLO responses and Received headers.
++;; Defaults to DOMAIN. Publish MX for DOMAIN pointing here, plus A/AAAA and PTR.
++;HOSTNAME =
++;;
++;; Enable the webmail UI at /mail.
++;WEB_ENABLED = true
++;;
++;; Listen addresses. Set to an empty value to disable a listener.
++;; SMTP_LISTEN takes inbound Internet mail, SMTP_SUBMISSION_LISTEN takes
++;; authenticated submission with STARTTLS, SMTPS_LISTEN takes implicit TLS.
++;SMTP_LISTEN = :25
++;SMTP_SUBMISSION_LISTEN = :587
++;SMTPS_LISTEN =
++;IMAP_LISTEN = :143
++;IMAPS_LISTEN =
++;;
++;; Certificate used for STARTTLS, SMTPS and IMAPS. Required by the implicit-TLS listeners.
++;TLS_CERT_FILE =
++;TLS_KEY_FILE =
++;;
++;; Allow SMTP AUTH and IMAP LOGIN over a cleartext connection. Keep false outside testing.
++;ALLOW_INSECURE_AUTH = false
++;;
++;; Allow authenticated users to send to remote domains through the [mailer] transport.
++;RELAY_ENABLED = true
++;;
++;; Limits. MAX_MESSAGE_SIZE and DEFAULT_QUOTA are bytes; 0 means unlimited.
++;MAX_MESSAGE_SIZE = 26214400
++;MAX_RECIPIENTS = 100
++;DEFAULT_QUOTA = 0
++;;
++;; Gitea username receiving postmaster@ and abuse@ mail, as required by RFC 2142.
++;; Leave empty to reject those addresses unless a real account or alias owns them.
++;POSTMASTER_USER =
++;;
++;; Gitea username receiving every otherwise-undeliverable local address.
++;; Leave empty to reject unknown recipients, which is the safer default.
++;CATCH_ALL_USER =
++;;
++;; Sign outgoing mail with DKIM. The private key may be RSA (PKCS#1 or PKCS#8 PEM)
++;; or Ed25519 (PKCS#8 PEM), and should be readable only by the Gitea service account.
++;; Publish the public key at <DKIM_SELECTOR>._domainkey.<DKIM_DOMAIN>.
++;DKIM_ENABLED = false
++;DKIM_DOMAIN =
++;DKIM_SELECTOR = gitea
++;DKIM_PRIVATE_KEY_FILE =
++;DKIM_HEADER_CANONICALIZATION = relaxed
++;DKIM_BODY_CANONICALIZATION = relaxed
++;;
++;; Authenticate inbound Internet mail.
++;VERIFY_DKIM = true
++;VERIFY_SPF = true
++;VERIFY_DMARC = true
++;;
++;; Act on the published DMARC policy instead of only recording the result.
++;DMARC_ENFORCE = true
++;;
++;; Answer 451 4.7.5 when DNS or authentication temporarily fails, so the sender retries.
++;DMARC_DEFER_ON_TEMPFAIL = true
++;;
++;; File p=quarantine failures into Junk instead of rejecting them.
++;DMARC_QUARANTINE_TO_JUNK = true
++
+ ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+ ;[cache]
+diff --git a/docs/mailbox-server.md b/docs/mailbox-server.md
+index 68e782c76c..211fee02ba 100644
+--- a/docs/mailbox-server.md
++++ b/docs/mailbox-server.md
+@@ -23,6 +23,26 @@ MAX_MESSAGE_SIZE = 26214400
+ MAX_RECIPIENTS = 100
+ DEFAULT_QUOTA = 0
+ 
++# Role and fallback recipients. Both name a Gitea username and are optional.
++POSTMASTER_USER = admin
++CATCH_ALL_USER =
++
++# Outbound DKIM signing. DKIM_DOMAIN defaults to DOMAIN.
++DKIM_ENABLED = true
++DKIM_DOMAIN = git.example.com
++DKIM_SELECTOR = gitea
++DKIM_PRIVATE_KEY_FILE = /etc/gitea/mail/dkim.key
++DKIM_HEADER_CANONICALIZATION = relaxed
++DKIM_BODY_CANONICALIZATION = relaxed
++
++# Inbound sender authentication.
++VERIFY_DKIM = true
++VERIFY_SPF = true
++VERIFY_DMARC = true
++DMARC_ENFORCE = true
++DMARC_DEFER_ON_TEMPFAIL = true
++DMARC_QUARANTINE_TO_JUNK = true
++
+ [email.incoming]
+ ENABLED = true
+ LOCAL_DELIVERY = true
+@@ -33,15 +53,63 @@ With `ALLOW_INSECURE_AUTH = false`, authenticated SMTP submission and IMAP requi
+ 
+ Each active individual Gitea account owns `<username>@DOMAIN`. Activated Gitea email addresses on the hosted domain are also accepted as inbound aliases. Additional aliases can be managed at `/mail/settings`.
+ 
+-## Existing Gitea mail integration
++## Recipient resolution
+ 
+-When `[mailer]` is enabled, Gitea-generated messages are partitioned before sending. Recipients hosted by `[mailbox] DOMAIN` are written directly to their local mailbox; other recipients continue through the configured Gitea mailer transport.
++An inbound local recipient is matched in this order:
+ 
+-When `[email.incoming] LOCAL_DELIVERY = true`, tokenized reply-by-email addresses are consumed directly by the integrated SMTP listener. The existing incoming-mail token decoder and issue/pull-request handlers are reused; the external IMAP polling loop is disabled.
++1. the tokenized `[email.incoming]` reply address, when `LOCAL_DELIVERY` is enabled;
++2. the Gitea username, after stripping any `+tag` sub-address;
++3. a mailbox alias from `/mail/settings`, first for the full local-part and then for the base local-part;
++4. an activated Gitea email address on the hosted domain;
++5. `POSTMASTER_USER` for `postmaster@` and `abuse@`, which RFC 2142 requires a public domain to accept;
++6. `CATCH_ALL_USER` for anything still unmatched.
++
++An account name always outranks an alias, so a later registration cannot have its mail captured by an alias created earlier. Adding an alias that collides with an existing username or Gitea email address is refused. With both `POSTMASTER_USER` and `CATCH_ALL_USER` empty, unknown recipients are rejected with `550 5.1.1` at RCPT time, which is the safer default for an Internet-exposed listener.
++
++## DKIM, SPF and DMARC
++
++Outbound messages produced by the webmail, authenticated SMTP submission, and the normal Gitea mailer path are signed with `github.com/emersion/go-msgauth/dkim` when `DKIM_ENABLED` is true. The private key can be RSA (PKCS#1 or PKCS#8 PEM) or Ed25519 (PKCS#8 PEM). Keep the private-key file restricted to the Gitea service account.
++
++Inbound Internet SMTP delivery is evaluated before Gitea adds its own `Received` or `Authentication-Results` fields, so DKIM verification sees the original RFC 5322 wire representation. DKIM and DMARC use `github.com/emersion/go-msgauth`; SPF uses `blitiri.com.ar/go/spf`.
++
++The receiver writes its results into a new `Authentication-Results` header. DMARC evaluation implements both accepted alignment paths:
++
++- aligned SPF (`smtp.mailfrom`/HELO against RFC5322.From, according to `aspf`), or
++- a passing aligned DKIM signature (`d=` against RFC5322.From, according to `adkim`).
++
++DMARC policy discovery checks the exact RFC5322.From domain and then its organizational domain using the public suffix list. When the organizational-domain policy is inherited, `sp=` is honored for subdomains. `pct=` is applied to quarantine/reject enforcement.
++
++With `DMARC_ENFORCE = true`:
++
++- `p=reject`/`sp=reject` failure returns SMTP `550 5.7.1`;
++- `p=quarantine`/`sp=quarantine` failure is accepted into `Junk` when `DMARC_QUARANTINE_TO_JUNK = true`;
++- a temporary DNS/authentication failure that prevents DMARC evaluation returns `451 4.7.5` when `DMARC_DEFER_ON_TEMPFAIL = true`;
++- `p=none` records are recorded but not rejected/quarantined.
+ 
+-## DNS
++DMARC-quarantined mail is not dispatched into Gitea's tokenized reply-by-email action handler. This prevents a message classified for quarantine from mutating an issue or pull request.
+ 
+-For Internet delivery, publish an MX record for `DOMAIN` that resolves to `HOSTNAME`, and publish A/AAAA records for `HOSTNAME`. Configure PTR/rDNS and the normal sender-authentication records required by your outbound relay/provider as appropriate.
++### DNS records
++
++At minimum publish the MX/A/AAAA records for inbound delivery and the sender-authentication records appropriate to the domain. For example, with selector `gitea` the DKIM public key is published at:
++
++```text
++gitea._domainkey.git.example.com. TXT "v=DKIM1; k=rsa; p=..."
++```
++
++SPF and DMARC are normal DNS TXT records, for example:
++
++```text
++git.example.com.        TXT "v=spf1 mx -all"
++_dmarc.git.example.com. TXT "v=DMARC1; p=reject; adkim=r; aspf=r; pct=100"
++```
++
++The exact SPF policy must describe the systems that really emit mail for your domain. If `[mailer]` relays through a separate provider, that provider must be represented in SPF as appropriate. Configure PTR/rDNS for the SMTP egress host as well.
++
++## Existing Gitea mail integration
++
++When `[mailer]` is enabled, Gitea-generated messages are partitioned before sending. Recipients hosted by `[mailbox] DOMAIN` are written directly to their local mailbox; other recipients continue through the configured Gitea mailer transport. DKIM signing happens before this partition, so the same signed RFC 5322 message is used for both local and remote copies.
++
++When `[email.incoming] LOCAL_DELIVERY = true`, tokenized reply-by-email addresses are consumed directly by the integrated SMTP listener. The existing incoming-mail token decoder and issue/pull-request handlers are reused; the external IMAP polling loop is disabled.
+ 
+ ## Storage
+ 
+@@ -58,4 +126,4 @@ The raw RFC 5322 message is retained for IMAP and `.eml` download. Parsed envelo
+ 
+ The integrated server implements the mailbox-facing SMTP/ESMTP path (including STARTTLS, AUTH PLAIN/LOGIN, local recipient validation, authenticated relay, size/recipient limits and null reverse paths) and an IMAP4 server backed by the same database storage. HTML mail is sanitized before rendering in the authenticated web UI.
+ 
+-Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution and direct-to-MX queueing. DKIM signing, SPF/DMARC evaluation, reputation/greylisting, antivirus and spam filtering are therefore expected to be supplied by the configured outbound/inbound edge when those controls are required for an Internet-exposed production deployment.
++Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution, an outbound retry queue, bounce processing, reputation/greylisting, antivirus or content-spam filtering. DKIM signing plus inbound DKIM/SPF/DMARC authentication are native, but a production Internet mail deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the deployment boundary.
+diff --git a/go.mod b/go.mod
+index d18f57c89b..6bcf2b190b 100644
+--- a/go.mod
++++ b/go.mod
+@@ -5,6 +5,7 @@ go 1.27
+ toolchain go1.27.0
+ 
+ require (
++	blitiri.com.ar/go/spf v1.5.1
+ 	connectrpc.com/connect v1.20.0
+ 	gitea.com/go-chi/binding v0.0.0-20260819122636-082915a69981
+ 	gitea.com/go-chi/cache v0.2.1
+@@ -39,7 +40,8 @@ require (
+ 	github.com/dustin/go-humanize v1.0.1
+ 	github.com/editorconfig/editorconfig-core-go/v2 v2.6.4
+ 	github.com/emersion/go-imap v1.2.1
+-	github.com/emersion/go-message v0.15.0
++	github.com/emersion/go-message v0.18.1
++	github.com/emersion/go-msgauth v0.7.0
+ 	github.com/emirpasic/gods v1.18.1
+ 	github.com/ethantkoenig/rupture v1.0.1
+ 	github.com/felixge/fgprof v0.9.5
+@@ -116,6 +118,8 @@ require (
+ 	gopkg.in/ini.v1 v1.67.3
+ 	modernc.org/sqlite v1.57.0
+ 	mvdan.cc/xurls/v2 v2.6.0
++	sirherobrine23.com.br/Sirherobrine23/whois v0.1.0
++	strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab
+ 	xorm.io/builder v0.3.13
+ 	xorm.io/xorm v1.4.1
+ )
+diff --git a/go.sum b/go.sum
+index aca12acb49..bdd8645e74 100644
+--- a/go.sum
++++ b/go.sum
+@@ -1,3 +1,5 @@
++blitiri.com.ar/go/spf v1.5.1 h1:CWUEasc44OrANJD8CzceRnRn1Jv0LttY68cYym2/pbE=
++blitiri.com.ar/go/spf v1.5.1/go.mod h1:E71N92TfL4+Yyd5lpKuE9CAF2pd4JrUq1xQfkTxoNdk=
+ cloud.google.com/go/compute/metadata v0.9.0 h1:pDUj4QMoPejqq20dK0Pg2N4yG9zIkYGdBtwLoEkH9Zs=
+ cloud.google.com/go/compute/metadata v0.9.0/go.mod h1:E0bWwX5wTnLPedCKqk3pJmVgCBSM6qQI1yTBdEb3C10=
+ code.pfad.fr/check v1.1.0 h1:GWvjdzhSEgHvEHe2uJujDcpmZoySKuHQNrZMfzfO0bE=
+@@ -253,8 +255,11 @@ github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o
+ github.com/elazarl/goproxy v1.7.2/go.mod h1:82vkLNir0ALaW14Rc399OTTjyNREgmdL2cVoIbS6XaE=
+ github.com/emersion/go-imap v1.2.1 h1:+s9ZjMEjOB8NzZMVTM3cCenz2JrQIGGo5j1df19WjTA=
+ github.com/emersion/go-imap v1.2.1/go.mod h1:Qlx1FSx2FTxjnjWpIlVNEuX+ylerZQNFE5NsmKFSejY=
+-github.com/emersion/go-message v0.15.0 h1:urgKGqt2JAc9NFJcgncQcohHdiYb803YTH9OQwHBHIY=
+ github.com/emersion/go-message v0.15.0/go.mod h1:wQUEfE+38+7EW8p8aZ96ptg6bAb1iwdgej19uXASlE4=
++github.com/emersion/go-message v0.18.1 h1:tfTxIoXFSFRwWaZsgnqS1DSZuGpYGzSmCZD8SK3QA2E=
++github.com/emersion/go-message v0.18.1/go.mod h1:XpJyL70LwRvq2a8rVbHXikPgKj8+aI0kGdHlg16ibYA=
++github.com/emersion/go-msgauth v0.7.0 h1:vj2hMn6KhFtW41kshIBTXvp6KgYSqpA/ZN9Pv4g1INc=
++github.com/emersion/go-msgauth v0.7.0/go.mod h1:mmS9I6HkSovrNgq0HNXTeu8l3sRAAuQ9RMvbM4KU7Ck=
+ github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
+ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 h1:oP4q0fw+fOSWn3DfFi4EXdT+B+gTtzx8GC9xsc26Znk=
+ github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
+@@ -953,6 +958,10 @@ mvdan.cc/xurls/v2 v2.6.0 h1:3NTZpeTxYVWNSokW3MKeyVkz/j7uYXYiMtXRUfmjbgI=
+ mvdan.cc/xurls/v2 v2.6.0/go.mod h1:bCvEZ1XvdA6wDnxY7jPPjEmigDtvtvPXAD/Exa9IMSk=
+ pgregory.net/rapid v0.4.2 h1:lsi9jhvZTYvzVpeG93WWgimPRmiJQfGFRNTEZh1dtY0=
+ pgregory.net/rapid v0.4.2/go.mod h1:UYpPVyjFHzYBGHIxLFoupi8vwk6rXNzRY9OMvVxFIOU=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0 h1:3xrfmFaewGIwdcUx3uIrvm58zNKR0/mqYp6crYyMw2Y=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0/go.mod h1:5mHKLa1kL2BX5pO/jLtdbtYNJICcvFe7Trc8E5mG+JY=
++strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab h1:3IZDVyI8uBmZko6pwm39f7mE0aTY7LViNdQHMeH7U60=
++strk.kbt.io/projects/go/libravatar v0.0.0-20260301104140-add494e31dab/go.mod h1:FJGmPh3vz9jSos1L/F91iAgnC/aejc0wIIrF2ZwJxdY=
+ xorm.io/builder v0.3.13 h1:a3jmiVVL19psGeXx8GIurTp7p0IIgqeDmwhcR6BAOAo=
+ xorm.io/builder v0.3.13/go.mod h1:aUW0S9eb9VCaPohFCH3j7czOx1PMW3i1HrSzbLYGBSE=
+ xorm.io/xorm v1.4.1 h1:m7QlNd0eBGb31IV4Q/ow0Du83rtdC1CiwlvJZGvYde8=
+diff --git a/models/mailbox/mailbox.go b/models/mailbox/mailbox.go
+index d39070a5df..e78cea42b5 100644
+--- a/models/mailbox/mailbox.go
++++ b/models/mailbox/mailbox.go
+@@ -113,10 +113,12 @@ type MailAlias struct {
+ // Short aliases keep the mailbox package API readable while the canonical type
+ // names stay globally unique for db.NamesToBean, which also indexes models by
+ // reflected Go type name.
+-type Message = MailMessage
+-type Attachment = MailAttachment
+-type Folder = MailFolder
+-type Alias = MailAlias
++type (
++	Message    = MailMessage
++	Attachment = MailAttachment
++	Folder     = MailFolder
++	Alias      = MailAlias
++)
+ 
+ func (*MailMessage) TableName() string    { return "mailbox_message" }
+ func (*MailAttachment) TableName() string { return "mailbox_attachment" }
+@@ -469,7 +471,7 @@ func ListMessages(ctx context.Context, userID int64, folder, query string, limit
+ 	if folder == "" {
+ 		folder = FolderInbox
+ 	}
+-	cond := builder.Eq{"user_id": userID, "folder": folder}
++	var cond builder.Cond = builder.Eq{"user_id": userID, "folder": folder}
+ 	if folder != FolderTrash {
+ 		cond = cond.And(builder.Eq{"deleted": false})
+ 	}
+@@ -487,13 +489,29 @@ func ListMessages(ctx context.Context, userID int64, folder, query string, limit
+ 		return nil, 0, err
+ 	}
+ 	msgs := make([]*Message, 0, limit)
+-	err = db.GetEngine(ctx).Where(cond).Desc("received_unix").Limit(limit, offset).Find(&msgs)
++	err = db.GetEngine(ctx).Where(cond).Omit("raw", "html_body", "text_body").Desc("received_unix").Limit(limit, offset).Find(&msgs)
+ 	return msgs, count, err
+ }
+ 
++// ListFolderMessages returns every message in a folder in UID order, without the
++// raw blob. IMAP clients list a whole folder on every poll, so the wire bytes are
++// only paid for when a command actually needs them; load those with GetMessageRaw.
+ func ListFolderMessages(ctx context.Context, userID int64, folder string) ([]*Message, error) {
+ 	msgs := make([]*Message, 0, 64)
+-	return msgs, db.GetEngine(ctx).Where("user_id = ? AND folder = ?", userID, NormalizeFolder(folder)).Asc("uid").Find(&msgs)
++	return msgs, db.GetEngine(ctx).Where("user_id = ? AND folder = ?", userID, NormalizeFolder(folder)).Omit("raw").Asc("uid").Find(&msgs)
++}
++
++// GetMessageRaw loads only the RFC 5322 bytes of one message.
++func GetMessageRaw(ctx context.Context, userID, id int64) ([]byte, error) {
++	msg := &Message{}
++	has, err := db.GetEngine(ctx).Cols("raw").Where("user_id = ? AND id = ?", userID, id).Get(msg)
++	if err != nil {
++		return nil, err
++	}
++	if !has {
++		return nil, ErrMessageNotExist
++	}
++	return msg.Raw, nil
+ }
+ 
+ func GetAttachments(ctx context.Context, userID, messageID int64) ([]*Attachment, error) {
+diff --git a/models/mailbox/mailbox_test.go b/models/mailbox/mailbox_test.go
+new file mode 100644
+index 0000000000..fc202b113d
+--- /dev/null
++++ b/models/mailbox/mailbox_test.go
+@@ -0,0 +1,64 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestNormalizeFolder(t *testing.T) {
++	// System folder names are case-insensitive so IMAP clients can send "inbox".
++	assert.Equal(t, FolderInbox, NormalizeFolder("inbox"))
++	assert.Equal(t, FolderInbox, NormalizeFolder("  InBoX  "))
++	assert.Equal(t, FolderJunk, NormalizeFolder("junk"))
++	assert.Equal(t, FolderSent, NormalizeFolder("SENT"))
++	// User folders keep their own casing.
++	assert.Equal(t, "Projects/Gitea", NormalizeFolder("Projects/Gitea"))
++	assert.Equal(t, "projects", NormalizeFolder("projects"))
++}
++
++func TestIsSystemFolder(t *testing.T) {
++	for _, name := range []string{"INBOX", "inbox", "Sent", "Drafts", "Trash", "Archive", "Junk"} {
++		assert.True(t, IsSystemFolder(name), name)
++	}
++	for _, name := range []string{"", "Projects", "INBOX/sub"} {
++		assert.False(t, IsSystemFolder(name), name)
++	}
++}
++
++func TestValidLocalPart(t *testing.T) {
++	for _, valid := range []string{"info", "no-reply", "a.b.c", "user+tag", "x"} {
++		assert.True(t, validLocalPart(valid), valid)
++	}
++	for _, invalid := range []string{
++		"",               // empty
++		"Upper",          // must already be lowercased by the caller
++		".leading",       // RFC 5322 dot-atom rules
++		"trailing.",      //
++		"double..dot",    //
++		"has space",      //
++		"has@at",         //
++		"quote\"d",       //
++		"inject\r\nRCPT", // header/command injection
++		"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", // over 64 octets
++	} {
++		assert.False(t, validLocalPart(invalid), "%q", invalid)
++	}
++}
++
++func TestHashInternetMessageID(t *testing.T) {
++	// The hash backs the de-duplication index, so it must be stable and distinct.
++	assert.Equal(t, hashInternetMessageID("<a@example.com>"), hashInternetMessageID("<a@example.com>"))
++	assert.NotEqual(t, hashInternetMessageID("<a@example.com>"), hashInternetMessageID("<b@example.com>"))
++	assert.Len(t, hashInternetMessageID("<a@example.com>"), 64)
++}
++
++func TestNewUIDValidity(t *testing.T) {
++	// Zero is not a legal UIDVALIDITY value.
++	for range 32 {
++		assert.NotZero(t, newUIDValidity())
++	}
++}
+diff --git a/modules/setting/mailbox.go b/modules/setting/mailbox.go
+index d59032e5d1..871296e092 100644
+--- a/modules/setting/mailbox.go
++++ b/modules/setting/mailbox.go
+@@ -29,16 +29,42 @@ var MailboxServer = struct {
+ 	MaxRecipients     int    `ini:"MAX_RECIPIENTS"`
+ 	DefaultQuota      int64  `ini:"DEFAULT_QUOTA"`
+ 	Hostname          string `ini:"HOSTNAME"`
++
++	PostmasterUser string `ini:"POSTMASTER_USER"`
++	CatchAllUser   string `ini:"CATCH_ALL_USER"`
++
++	DKIMEnabled                bool   `ini:"DKIM_ENABLED"`
++	DKIMDomain                 string `ini:"DKIM_DOMAIN"`
++	DKIMSelector               string `ini:"DKIM_SELECTOR"`
++	DKIMPrivateKeyFile         string `ini:"DKIM_PRIVATE_KEY_FILE"`
++	DKIMHeaderCanonicalization string `ini:"DKIM_HEADER_CANONICALIZATION"`
++	DKIMBodyCanonicalization   string `ini:"DKIM_BODY_CANONICALIZATION"`
++
++	VerifyDKIM           bool `ini:"VERIFY_DKIM"`
++	VerifySPF            bool `ini:"VERIFY_SPF"`
++	VerifyDMARC          bool `ini:"VERIFY_DMARC"`
++	DMARCEnforce         bool `ini:"DMARC_ENFORCE"`
++	DMARCDeferOnTempFail bool `ini:"DMARC_DEFER_ON_TEMPFAIL"`
++	DMARCQuarantineJunk  bool `ini:"DMARC_QUARANTINE_TO_JUNK"`
+ }{
+-	WebEnabled:           true,
+-	SMTPListen:           ":25",
+-	SMTPSubmissionListen: ":587",
+-	SMTPSListen:          "",
+-	IMAPListen:           ":143",
+-	IMAPSListen:          "",
+-	MaxMessageSize:       25 * 1024 * 1024,
+-	MaxRecipients:        100,
+-	RelayEnabled:         true,
++	WebEnabled:                 true,
++	SMTPListen:                 ":25",
++	SMTPSubmissionListen:       ":587",
++	SMTPSListen:                "",
++	IMAPListen:                 ":143",
++	IMAPSListen:                "",
++	MaxMessageSize:             25 * 1024 * 1024,
++	MaxRecipients:              100,
++	RelayEnabled:               true,
++	DKIMSelector:               "gitea",
++	DKIMHeaderCanonicalization: "relaxed",
++	DKIMBodyCanonicalization:   "relaxed",
++	VerifyDKIM:                 true,
++	VerifySPF:                  true,
++	VerifyDMARC:                true,
++	DMARCEnforce:               true,
++	DMARCDeferOnTempFail:       true,
++	DMARCQuarantineJunk:        true,
+ }
+ 
+ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+@@ -56,6 +82,20 @@ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+ 	sec.Key("MAX_RECIPIENTS").MustInt(100)
+ 	sec.Key("DEFAULT_QUOTA").MustInt64(0)
+ 	sec.Key("HOSTNAME").MustString(Domain)
++	sec.Key("POSTMASTER_USER").MustString("")
++	sec.Key("CATCH_ALL_USER").MustString("")
++	sec.Key("DKIM_ENABLED").MustBool(false)
++	sec.Key("DKIM_DOMAIN").MustString("")
++	sec.Key("DKIM_SELECTOR").MustString("gitea")
++	sec.Key("DKIM_PRIVATE_KEY_FILE").MustString("")
++	sec.Key("DKIM_HEADER_CANONICALIZATION").MustString("relaxed")
++	sec.Key("DKIM_BODY_CANONICALIZATION").MustString("relaxed")
++	sec.Key("VERIFY_DKIM").MustBool(true)
++	sec.Key("VERIFY_SPF").MustBool(true)
++	sec.Key("VERIFY_DMARC").MustBool(true)
++	sec.Key("DMARC_ENFORCE").MustBool(true)
++	sec.Key("DMARC_DEFER_ON_TEMPFAIL").MustBool(true)
++	sec.Key("DMARC_QUARANTINE_TO_JUNK").MustBool(true)
+ 
+ 	mustMapSetting(rootCfg, "mailbox", &MailboxServer)
+ 	MailboxServer.Domain = strings.ToLower(strings.TrimSpace(MailboxServer.Domain))
+@@ -67,9 +107,19 @@ func loadMailboxServerFrom(rootCfg ConfigProvider) {
+ 	MailboxServer.IMAPSListen = strings.TrimSpace(MailboxServer.IMAPSListen)
+ 	MailboxServer.TLSCertFile = strings.TrimSpace(MailboxServer.TLSCertFile)
+ 	MailboxServer.TLSKeyFile = strings.TrimSpace(MailboxServer.TLSKeyFile)
++	MailboxServer.PostmasterUser = strings.ToLower(strings.TrimSpace(MailboxServer.PostmasterUser))
++	MailboxServer.CatchAllUser = strings.ToLower(strings.TrimSpace(MailboxServer.CatchAllUser))
++	MailboxServer.DKIMDomain = strings.ToLower(strings.TrimSpace(MailboxServer.DKIMDomain))
++	MailboxServer.DKIMSelector = strings.TrimSpace(MailboxServer.DKIMSelector)
++	MailboxServer.DKIMPrivateKeyFile = strings.TrimSpace(MailboxServer.DKIMPrivateKeyFile)
++	MailboxServer.DKIMHeaderCanonicalization = strings.ToLower(strings.TrimSpace(MailboxServer.DKIMHeaderCanonicalization))
++	MailboxServer.DKIMBodyCanonicalization = strings.ToLower(strings.TrimSpace(MailboxServer.DKIMBodyCanonicalization))
+ 	if MailboxServer.Hostname == "" {
+ 		MailboxServer.Hostname = MailboxServer.Domain
+ 	}
++	if MailboxServer.DKIMDomain == "" {
++		MailboxServer.DKIMDomain = MailboxServer.Domain
++	}
+ 	if MailboxServer.MaxMessageSize < 0 {
+ 		MailboxServer.MaxMessageSize = 0
+ 	}
+diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
+index 6cb8a033a0..c654581f6f 100644
+--- a/options/locale/locale_en-US.json
++++ b/options/locale/locale_en-US.json
+@@ -514,6 +514,38 @@
+   "mail.team_invite.text_1": "%[1]s has invited you to join team %[2]s in organization %[3]s.",
+   "mail.team_invite.text_2": "Please click the following link to join the team:",
+   "mail.team_invite.text_3": "Note: This invitation was intended for %[1]s. If you were not expecting this invitation, you can ignore this email.",
++  "mailbox.title": "Mail",
++  "mailbox.compose": "Compose",
++  "mailbox.compose_title": "Compose email",
++  "mailbox.search_placeholder": "Search mail",
++  "mailbox.search": "Search",
++  "mailbox.no_messages": "No messages in this folder.",
++  "mailbox.no_subject": "(no subject)",
++  "mailbox.star": "Star",
++  "mailbox.unstar": "Unstar",
++  "mailbox.back": "Back",
++  "mailbox.reply": "Reply",
++  "mailbox.delete": "Delete",
++  "mailbox.move_to": "Move to…",
++  "mailbox.download_eml": "Download .eml",
++  "mailbox.attachments": "Attachments",
++  "mailbox.to": "To",
++  "mailbox.cc": "Cc",
++  "mailbox.bcc": "Bcc",
++  "mailbox.from": "From",
++  "mailbox.subject": "Subject",
++  "mailbox.body": "Message",
++  "mailbox.send": "Send",
++  "mailbox.cancel": "Cancel",
++  "mailbox.settings": "Mail settings",
++  "mailbox.address": "Mailbox address",
++  "mailbox.address_help": "Use your Gitea username and password for authenticated SMTP submission and IMAP.",
++  "mailbox.folders": "Folders",
++  "mailbox.create_folder": "Create folder",
++  "mailbox.no_custom_folders": "No custom folders configured.",
++  "mailbox.aliases": "Aliases",
++  "mailbox.add_alias": "Add alias",
++  "mailbox.no_aliases": "No aliases configured.",
+   "modal.yes": "Yes",
+   "modal.no": "No",
+   "modal.confirm": "Confirm",
+diff --git a/routers/init.go b/routers/init.go
+index 887fd5467c..da40f8c792 100644
+--- a/routers/init.go
++++ b/routers/init.go
+@@ -11,6 +11,7 @@ import (
+ 
+ 	"gitea.dev/models"
+ 	authmodel "gitea.dev/models/auth"
++	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/cache"
+ 	"gitea.dev/modules/git"
+ 	"gitea.dev/modules/git/gitcmd"
+@@ -158,6 +159,10 @@ func InitWebInstalled(ctx context.Context) {
+ 	mustInit(repo_migrations.Init)
+ 	mustInit(websocket_service.Init)
+ 	mustInitCtx(ctx, mailer_incoming.Init)
++	mailbox_service.SetSignInFunc(func(ctx context.Context, username, password string) (*user_model.User, error) {
++		user, _, err := auth.UserSignIn(ctx, username, password)
++		return user, err
++	})
+ 	mustInitCtx(ctx, mailbox_service.Init)
+ 
+ 	mustInitCtx(ctx, syncAppConfForGit)
+diff --git a/routers/web/mailbox/mailbox.go b/routers/web/mailbox/mailbox.go
+index 516fc52518..381c42e07d 100644
+--- a/routers/web/mailbox/mailbox.go
++++ b/routers/web/mailbox/mailbox.go
+@@ -46,7 +46,7 @@ func prepareCommon(ctx *context.Context) bool {
+ 		ctx.ServerError("UnreadCount", err)
+ 		return false
+ 	}
+-	ctx.Data["Title"] = "Mail"
++	ctx.Data["Title"] = ctx.Locale.TrString("mailbox.title")
+ 	ctx.Data["PageIsMailbox"] = true
+ 	ctx.Data["MailboxFolders"] = folders
+ 	ctx.Data["MailboxUnread"] = unread
+@@ -269,6 +269,7 @@ func Raw(ctx *context.Context) {
+ 	}
+ 	ctx.Resp.Header().Set("Content-Type", "message/rfc822")
+ 	ctx.Resp.Header().Set("Content-Disposition", httplib.EncodeContentDispositionAttachment("message.eml"))
++	ctx.Resp.Header().Set("X-Content-Type-Options", "nosniff")
+ 	_, _ = ctx.Resp.Write(msg.Raw)
+ }
+ 
+diff --git a/services/mailbox/auth.go b/services/mailbox/auth.go
+new file mode 100644
+index 0000000000..57a8daf9be
+--- /dev/null
++++ b/services/mailbox/auth.go
+@@ -0,0 +1,520 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"bytes"
++	"context"
++	"crypto"
++	"crypto/ed25519"
++	"crypto/rsa"
++	"crypto/sha256"
++	"crypto/x509"
++	"encoding/hex"
++	"encoding/pem"
++	"errors"
++	"fmt"
++	"net"
++	"net/mail"
++	"os"
++	"strings"
++	"sync"
++	"time"
++
++	"gitea.dev/modules/log"
++	"gitea.dev/modules/setting"
++
++	"blitiri.com.ar/go/spf"
++	"github.com/emersion/go-msgauth/authres"
++	"github.com/emersion/go-msgauth/dkim"
++	"github.com/emersion/go-msgauth/dmarc"
++	"golang.org/x/net/idna"
++	"golang.org/x/net/publicsuffix"
++)
++
++const messageAuthenticationTimeout = 30 * time.Second
++
++var (
++	outboundDKIMSigner   crypto.Signer
++	outboundDKIMSignerMu sync.Mutex
++)
++
++type inboundAuthAction uint8
++
++const (
++	inboundAuthAccept inboundAuthAction = iota
++	inboundAuthQuarantine
++	inboundAuthReject
++	inboundAuthDefer
++)
++
++type inboundAuthentication struct {
++	Header string
++	Action inboundAuthAction
++}
++
++func initMessageAuthentication() error {
++	if strings.ContainsAny(setting.MailboxServer.Hostname, "\r\n") {
++		return errors.New("[mailbox] HOSTNAME contains an invalid newline")
++	}
++	if setting.MailboxServer.VerifyDMARC && !setting.MailboxServer.VerifyDKIM && !setting.MailboxServer.VerifySPF {
++		return errors.New("[mailbox] VERIFY_DMARC requires VERIFY_DKIM and/or VERIFY_SPF")
++	}
++	if !setting.MailboxServer.DKIMEnabled {
++		return nil
++	}
++	if setting.MailboxServer.DKIMDomain == "" {
++		return errors.New("[mailbox] DKIM_DOMAIN must be configured when DKIM_ENABLED is true")
++	}
++	if setting.MailboxServer.DKIMSelector == "" {
++		return errors.New("[mailbox] DKIM_SELECTOR must be configured when DKIM_ENABLED is true")
++	}
++	if setting.MailboxServer.DKIMPrivateKeyFile == "" {
++		return errors.New("[mailbox] DKIM_PRIVATE_KEY_FILE must be configured when DKIM_ENABLED is true")
++	}
++	if _, err := canonicalization(setting.MailboxServer.DKIMHeaderCanonicalization); err != nil {
++		return fmt.Errorf("[mailbox] DKIM_HEADER_CANONICALIZATION: %w", err)
++	}
++	if _, err := canonicalization(setting.MailboxServer.DKIMBodyCanonicalization); err != nil {
++		return fmt.Errorf("[mailbox] DKIM_BODY_CANONICALIZATION: %w", err)
++	}
++
++	return ensureDKIMSigner()
++}
++
++func ensureDKIMSigner() error {
++	if !setting.MailboxServer.DKIMEnabled {
++		return nil
++	}
++	outboundDKIMSignerMu.Lock()
++	defer outboundDKIMSignerMu.Unlock()
++	if outboundDKIMSigner != nil {
++		return nil
++	}
++	keyData, err := os.ReadFile(setting.MailboxServer.DKIMPrivateKeyFile)
++	if err != nil {
++		return fmt.Errorf("read DKIM private key: %w", err)
++	}
++	signer, err := parseDKIMPrivateKey(keyData)
++	if err != nil {
++		return fmt.Errorf("parse DKIM private key: %w", err)
++	}
++	outboundDKIMSigner = signer
++	return nil
++}
++
++func parseDKIMPrivateKey(data []byte) (crypto.Signer, error) {
++	block, _ := pem.Decode(data)
++	if block == nil {
++		return nil, errors.New("private key is not PEM encoded")
++	}
++
++	if key, err := x509.ParsePKCS1PrivateKey(block.Bytes); err == nil {
++		return key, nil
++	}
++	if key, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
++		signer, ok := key.(crypto.Signer)
++		if !ok {
++			return nil, fmt.Errorf("PKCS#8 private key type %T does not implement crypto.Signer", key)
++		}
++		switch signer.Public().(type) {
++		case *rsa.PublicKey, ed25519.PublicKey:
++			return signer, nil
++		default:
++			return nil, fmt.Errorf("unsupported DKIM private key type %T (RSA and Ed25519 are supported)", signer.Public())
++		}
++	}
++	return nil, errors.New("unsupported private key encoding; expected RSA PKCS#1 or RSA/Ed25519 PKCS#8")
++}
++
++func canonicalization(value string) (dkim.Canonicalization, error) {
++	switch strings.ToLower(strings.TrimSpace(value)) {
++	case "simple":
++		return dkim.CanonicalizationSimple, nil
++	case "", "relaxed":
++		return dkim.CanonicalizationRelaxed, nil
++	default:
++		return "", fmt.Errorf("unsupported value %q (expected simple or relaxed)", value)
++	}
++}
++
++// SignOutboundDKIM prepends a DKIM-Signature to an RFC 5322 message when the
++// integrated mailbox DKIM signer is enabled. The message bytes are otherwise
++// returned unchanged.
++func SignOutboundDKIM(raw []byte) ([]byte, error) {
++	if !setting.MailboxServer.DKIMEnabled {
++		return raw, nil
++	}
++	if err := ensureDKIMSigner(); err != nil {
++		return nil, err
++	}
++	outboundDKIMSignerMu.Lock()
++	signerKey := outboundDKIMSigner
++	outboundDKIMSignerMu.Unlock()
++	if signerKey == nil {
++		return nil, errors.New("DKIM is enabled but the signer is not initialized")
++	}
++	headerCanon, err := canonicalization(setting.MailboxServer.DKIMHeaderCanonicalization)
++	if err != nil {
++		return nil, err
++	}
++	bodyCanon, err := canonicalization(setting.MailboxServer.DKIMBodyCanonicalization)
++	if err != nil {
++		return nil, err
++	}
++
++	signer, err := dkim.NewSigner(&dkim.SignOptions{
++		Domain:                 setting.MailboxServer.DKIMDomain,
++		Selector:               setting.MailboxServer.DKIMSelector,
++		Signer:                 signerKey,
++		Hash:                   crypto.SHA256,
++		HeaderCanonicalization: headerCanon,
++		BodyCanonicalization:   bodyCanon,
++		HeaderKeys: []string{
++			"From", "To", "Cc", "Reply-To", "Subject", "Date", "Message-ID",
++			"MIME-Version", "Content-Type", "Content-Transfer-Encoding",
++			"In-Reply-To", "References", "List-ID", "List-Unsubscribe", "List-Unsubscribe-Post",
++		},
++	})
++	if err != nil {
++		return nil, fmt.Errorf("create DKIM signer: %w", err)
++	}
++	if _, err := signer.Write(raw); err != nil {
++		_ = signer.Close()
++		return nil, fmt.Errorf("write message to DKIM signer: %w", err)
++	}
++	if err := signer.Close(); err != nil {
++		return nil, fmt.Errorf("finalize DKIM signature: %w", err)
++	}
++	sig := signer.Signature()
++	out := make([]byte, 0, len(sig)+len(raw))
++	out = append(out, sig...)
++	out = append(out, raw...)
++	return out, nil
++}
++
++func authenticateIncoming(ctx context.Context, remoteIP net.IP, helo, envelopeFrom string, raw []byte) *inboundAuthentication {
++	ctx, cancel := context.WithTimeout(ctx, messageAuthenticationTimeout)
++	defer cancel()
++
++	results := make([]authres.Result, 0, 4)
++
++	spfValue := authres.ResultNone
++	spfIdentity := smtpIdentityDomain(envelopeFrom, helo)
++	spfTempError := false
++	if setting.MailboxServer.VerifySPF && remoteIP != nil {
++		spfResult, spfErr := spf.CheckHostWithSender(remoteIP, helo, envelopeFrom, spf.WithContext(ctx))
++		spfValue = spfResultValue(spfResult)
++		spfTempError = spfResult == spf.TempError
++		spfAuth := &authres.SPFResult{Value: spfValue, Helo: cleanAuthValue(helo)}
++		if envelopeFrom != "" {
++			spfAuth.From = cleanAuthValue(envelopeFrom)
++		}
++		if spfErr != nil && spfResult != spf.Pass {
++			spfAuth.Reason = cleanAuthReason(spfErr)
++		}
++		results = append(results, spfAuth)
++	}
++
++	verifications := make([]*dkim.Verification, 0)
++	dkimTempError := false
++	if setting.MailboxServer.VerifyDKIM {
++		verified, verifyErr := dkim.VerifyWithOptions(bytes.NewReader(raw), &dkim.VerifyOptions{
++			LookupTXT: func(domain string) ([]string, error) {
++				return net.DefaultResolver.LookupTXT(ctx, domain)
++			},
++			MaxVerifications: 16,
++		})
++		if verifyErr != nil {
++			var value authres.ResultValue = authres.ResultFail
++			if dkim.IsTempFail(verifyErr) {
++				value = authres.ResultTempError
++				dkimTempError = true
++			} else if dkim.IsPermFail(verifyErr) {
++				value = authres.ResultPermError
++			}
++			results = append(results, &authres.DKIMResult{Value: value, Reason: cleanAuthReason(verifyErr)})
++		} else if len(verified) == 0 {
++			results = append(results, &authres.DKIMResult{Value: authres.ResultNone})
++		} else {
++			verifications = verified
++			for _, verification := range verified {
++				var value authres.ResultValue = authres.ResultPass
++				if verification.Err != nil {
++					value = authres.ResultFail
++					if dkim.IsTempFail(verification.Err) {
++						value = authres.ResultTempError
++						dkimTempError = true
++					} else if dkim.IsPermFail(verification.Err) {
++						value = authres.ResultPermError
++					}
++				}
++				entry := &authres.DKIMResult{
++					Value:      value,
++					Domain:     cleanAuthValue(verification.Domain),
++					Identifier: cleanAuthValue(verification.Identifier),
++				}
++				if verification.Err != nil {
++					entry.Reason = cleanAuthReason(verification.Err)
++				}
++				results = append(results, entry)
++			}
++		}
++	}
++
++	auth := &inboundAuthentication{Action: inboundAuthAccept}
++	fromDomain, fromErr := rfc5322FromDomain(raw)
++	if setting.MailboxServer.VerifyDMARC {
++		dmarcResult := &authres.DMARCResult{From: cleanAuthValue(fromDomain)}
++		switch {
++		case fromErr != nil:
++			dmarcResult.Value = authres.ResultPermError
++			dmarcResult.Reason = cleanAuthReason(fromErr)
++		case fromDomain == "":
++			dmarcResult.Value = authres.ResultPermError
++			dmarcResult.Reason = "missing RFC5322.From domain"
++		default:
++			record, policyDomain, organizational, err := lookupDMARCPolicy(ctx, fromDomain)
++			if err != nil {
++				switch {
++				case errors.Is(err, dmarc.ErrNoPolicy):
++					dmarcResult.Value = authres.ResultNone
++				case dmarc.IsTempFail(err):
++					dmarcResult.Value = authres.ResultTempError
++					dmarcResult.Reason = cleanAuthReason(err)
++					if setting.MailboxServer.DMARCEnforce && setting.MailboxServer.DMARCDeferOnTempFail {
++						auth.Action = inboundAuthDefer
++					}
++				default:
++					dmarcResult.Value = authres.ResultPermError
++					dmarcResult.Reason = cleanAuthReason(err)
++				}
++			} else {
++				alignedSPF := setting.MailboxServer.VerifySPF && spfValue == authres.ResultPass && domainAligned(spfIdentity, fromDomain, record.SPFAlignment)
++				alignedDKIM := false
++				for _, verification := range verifications {
++					if verification.Err == nil && domainAligned(verification.Domain, fromDomain, record.DKIMAlignment) {
++						alignedDKIM = true
++						break
++					}
++				}
++
++				if alignedSPF || alignedDKIM {
++					dmarcResult.Value = authres.ResultPass
++				} else if spfTempError || dkimTempError {
++					dmarcResult.Value = authres.ResultTempError
++					dmarcResult.Reason = "SPF or DKIM evaluation had a temporary failure"
++					if setting.MailboxServer.DMARCEnforce && setting.MailboxServer.DMARCDeferOnTempFail {
++						auth.Action = inboundAuthDefer
++					}
++				} else {
++					dmarcResult.Value = authres.ResultFail
++					dmarcResult.Reason = fmt.Sprintf("no aligned SPF or DKIM identifier for %s", fromDomain)
++					policy := record.Policy
++					if organizational && record.SubdomainPolicy != "" {
++						policy = record.SubdomainPolicy
++					}
++					if setting.MailboxServer.DMARCEnforce && dmarcSampleApplies(record, raw, remoteIP) {
++						switch policy {
++						case dmarc.PolicyReject:
++							auth.Action = inboundAuthReject
++						case dmarc.PolicyQuarantine:
++							auth.Action = inboundAuthQuarantine
++						}
++					}
++				}
++				if policyDomain != "" && policyDomain != fromDomain {
++					dmarcResult.Reason = strings.TrimSpace(dmarcResult.Reason + " policy-domain=" + policyDomain)
++				}
++			}
++		}
++		results = append(results, dmarcResult)
++	}
++
++	if len(results) > 0 {
++		auth.Header = formatAuthenticationResults(setting.MailboxServer.Hostname, results)
++	}
++	return auth
++}
++
++func lookupDMARCPolicy(ctx context.Context, fromDomain string) (*dmarc.Record, string, bool, error) {
++	fromDomain = normalizeDomain(fromDomain)
++	if fromDomain == "" {
++		return nil, "", false, dmarc.ErrNoPolicy
++	}
++	lookup := func(domain string) (*dmarc.Record, error) {
++		return dmarc.LookupWithOptions(domain, &dmarc.LookupOptions{
++			LookupTXT: func(name string) ([]string, error) {
++				return net.DefaultResolver.LookupTXT(ctx, name)
++			},
++		})
++	}
++	record, err := lookup(fromDomain)
++	if err == nil {
++		return record, fromDomain, false, nil
++	}
++	if !errors.Is(err, dmarc.ErrNoPolicy) {
++		return nil, fromDomain, false, err
++	}
++	org, orgErr := publicsuffix.EffectiveTLDPlusOne(fromDomain)
++	if orgErr != nil || strings.EqualFold(org, fromDomain) {
++		return nil, fromDomain, false, dmarc.ErrNoPolicy
++	}
++	record, err = lookup(org)
++	if err != nil {
++		return nil, org, true, err
++	}
++	return record, org, true, nil
++}
++
++func rfc5322FromDomain(raw []byte) (string, error) {
++	message, err := mail.ReadMessage(bytes.NewReader(raw))
++	if err != nil {
++		return "", fmt.Errorf("parse RFC5322 message: %w", err)
++	}
++	from, err := message.Header.AddressList("From")
++	if err != nil {
++		return "", fmt.Errorf("parse RFC5322.From: %w", err)
++	}
++	if len(from) != 1 {
++		return "", fmt.Errorf("RFC5322.From must contain exactly one mailbox, got %d", len(from))
++	}
++	_, domain, ok := strings.Cut(from[0].Address, "@")
++	if !ok {
++		return "", errors.New("RFC5322.From has no domain")
++	}
++	domain = normalizeDomain(domain)
++	if domain == "" {
++		return "", errors.New("RFC5322.From has an invalid domain")
++	}
++	return domain, nil
++}
++
++func smtpIdentityDomain(envelopeFrom, helo string) string {
++	if envelopeFrom != "" {
++		if parsed, err := mail.ParseAddress(envelopeFrom); err == nil {
++			if _, domain, ok := strings.Cut(parsed.Address, "@"); ok {
++				return normalizeDomain(domain)
++			}
++		}
++	}
++	return normalizeDomain(strings.Trim(helo, "[]"))
++}
++
++func normalizeDomain(domain string) string {
++	domain = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(domain)), ".")
++	if domain == "" || net.ParseIP(domain) != nil {
++		return domain
++	}
++	ascii, err := idna.Lookup.ToASCII(domain)
++	if err != nil {
++		return ""
++	}
++	return strings.ToLower(strings.TrimSuffix(ascii, "."))
++}
++
++func domainAligned(authDomain, fromDomain string, mode dmarc.AlignmentMode) bool {
++	authDomain = normalizeDomain(authDomain)
++	fromDomain = normalizeDomain(fromDomain)
++	if authDomain == "" || fromDomain == "" {
++		return false
++	}
++	if mode == dmarc.AlignmentStrict {
++		return authDomain == fromDomain
++	}
++	authOrg, authErr := publicsuffix.EffectiveTLDPlusOne(authDomain)
++	fromOrg, fromErr := publicsuffix.EffectiveTLDPlusOne(fromDomain)
++	if authErr != nil || fromErr != nil {
++		return authDomain == fromDomain
++	}
++	return strings.EqualFold(authOrg, fromOrg)
++}
++
++func spfResultValue(result spf.Result) authres.ResultValue {
++	switch result {
++	case spf.Pass:
++		return authres.ResultPass
++	case spf.Fail:
++		return authres.ResultFail
++	case spf.SoftFail:
++		return authres.ResultSoftFail
++	case spf.Neutral:
++		return authres.ResultNeutral
++	case spf.TempError:
++		return authres.ResultTempError
++	case spf.PermError:
++		return authres.ResultPermError
++	default:
++		return authres.ResultNone
++	}
++}
++
++func dmarcSampleApplies(record *dmarc.Record, raw []byte, remoteIP net.IP) bool {
++	if record == nil || record.Percent == nil || *record.Percent >= 100 {
++		return true
++	}
++	if *record.Percent <= 0 {
++		return false
++	}
++	h := sha256.New()
++	_, _ = h.Write(raw)
++	_, _ = h.Write(remoteIP)
++	sum := h.Sum(nil)
++	bucket := int(sum[0]) * 100 / 256
++	return bucket < *record.Percent
++}
++
++func formatAuthenticationResults(identity string, results []authres.Result) string {
++	value := strings.TrimSpace(authres.Format(cleanAuthValue(identity), results))
++	if value == "" {
++		return ""
++	}
++	if strings.HasPrefix(strings.ToLower(value), "authentication-results:") {
++		if !strings.HasSuffix(value, "\r\n") {
++			value += "\r\n"
++		}
++		return value
++	}
++	return "Authentication-Results: " + value + "\r\n"
++}
++
++func prependMessageHeader(raw []byte, header string) []byte {
++	if header == "" {
++		return raw
++	}
++	if !strings.HasSuffix(header, "\r\n") {
++		header += "\r\n"
++	}
++	out := make([]byte, 0, len(header)+len(raw))
++	out = append(out, header...)
++	out = append(out, raw...)
++	return out
++}
++
++func cleanAuthValue(value string) string {
++	value = strings.NewReplacer("\r", "", "\n", "", ";", "_").Replace(strings.TrimSpace(value))
++	if len(value) > 512 {
++		value = value[:512]
++	}
++	return value
++}
++
++func cleanAuthReason(err error) string {
++	if err == nil {
++		return ""
++	}
++	value := cleanAuthValue(err.Error())
++	if len(value) > 200 {
++		value = value[:200]
++	}
++	return value
++}
++
++func logInboundAuthentication(action inboundAuthAction, remoteIP net.IP, envelopeFrom string) {
++	if action == inboundAuthAccept {
++		return
++	}
++	fingerprint := sha256.Sum256([]byte(envelopeFrom))
++	log.Info("Mailbox inbound authentication action=%d remote=%s sender_hash=%s", action, remoteIP, hex.EncodeToString(fingerprint[:8]))
++}
+diff --git a/services/mailbox/auth_test.go b/services/mailbox/auth_test.go
+new file mode 100644
+index 0000000000..5f586f82fe
+--- /dev/null
++++ b/services/mailbox/auth_test.go
+@@ -0,0 +1,238 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"bytes"
++	"crypto/ed25519"
++	"crypto/rand"
++	"crypto/rsa"
++	"crypto/x509"
++	"encoding/base64"
++	"encoding/pem"
++	"os"
++	"path/filepath"
++	"testing"
++
++	"gitea.dev/modules/setting"
++	"gitea.dev/modules/test"
++
++	"github.com/emersion/go-msgauth/dkim"
++	"github.com/emersion/go-msgauth/dmarc"
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++const testMessage = "From: Alice <alice@example.com>\r\n" +
++	"To: Bob <bob@example.org>\r\n" +
++	"Subject: hello\r\n" +
++	"Date: Tue, 18 Aug 2026 10:00:00 +0000\r\n" +
++	"Message-ID: <abc@example.com>\r\n" +
++	"\r\n" +
++	"body line one\r\n" +
++	"body line two\r\n"
++
++// writeRSAKey writes a PEM private key and returns its path plus the DKIM public
++// key record value that a verifier would find in DNS.
++func writeRSAKey(t *testing.T, pkcs8 bool) (string, string) {
++	t.Helper()
++	key, err := rsa.GenerateKey(rand.Reader, 2048)
++	require.NoError(t, err)
++
++	var block *pem.Block
++	if pkcs8 {
++		der, err := x509.MarshalPKCS8PrivateKey(key)
++		require.NoError(t, err)
++		block = &pem.Block{Type: "PRIVATE KEY", Bytes: der}
++	} else {
++		block = &pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)}
++	}
++	path := filepath.Join(t.TempDir(), "dkim.key")
++	require.NoError(t, os.WriteFile(path, pem.EncodeToMemory(block), 0o600))
++
++	pub, err := x509.MarshalPKIXPublicKey(&key.PublicKey)
++	require.NoError(t, err)
++	return path, "v=DKIM1; k=rsa; p=" + base64.StdEncoding.EncodeToString(pub)
++}
++
++// configureDKIM points the package at a key file and clears the cached signer so
++// each test signs with its own key.
++func configureDKIM(t *testing.T, keyFile string) {
++	t.Helper()
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMEnabled, true))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMDomain, "example.com"))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMSelector, "gitea"))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMPrivateKeyFile, keyFile))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMHeaderCanonicalization, "relaxed"))
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMBodyCanonicalization, "relaxed"))
++
++	outboundDKIMSignerMu.Lock()
++	outboundDKIMSigner = nil
++	outboundDKIMSignerMu.Unlock()
++	t.Cleanup(func() {
++		outboundDKIMSignerMu.Lock()
++		outboundDKIMSigner = nil
++		outboundDKIMSignerMu.Unlock()
++	})
++}
++
++func TestSignOutboundDKIMVerifies(t *testing.T) {
++	for _, pkcs8 := range []bool{false, true} {
++		name := "PKCS1"
++		if pkcs8 {
++			name = "PKCS8"
++		}
++		t.Run(name, func(t *testing.T) {
++			keyFile, record := writeRSAKey(t, pkcs8)
++			configureDKIM(t, keyFile)
++
++			signed, err := SignOutboundDKIM([]byte(testMessage))
++			require.NoError(t, err)
++			assert.True(t, bytes.HasSuffix(signed, []byte(testMessage)), "the original message must be preserved verbatim")
++			assert.Contains(t, string(signed), "DKIM-Signature:")
++
++			verifications, err := dkim.VerifyWithOptions(bytes.NewReader(signed), &dkim.VerifyOptions{
++				LookupTXT: func(domain string) ([]string, error) {
++					assert.Equal(t, "gitea._domainkey.example.com", domain)
++					return []string{record}, nil
++				},
++			})
++			require.NoError(t, err)
++			require.Len(t, verifications, 1)
++			require.NoError(t, verifications[0].Err)
++			assert.Equal(t, "example.com", verifications[0].Domain)
++		})
++	}
++}
++
++func TestSignOutboundDKIMDetectsTampering(t *testing.T) {
++	keyFile, record := writeRSAKey(t, false)
++	configureDKIM(t, keyFile)
++
++	signed, err := SignOutboundDKIM([]byte(testMessage))
++	require.NoError(t, err)
++	tampered := bytes.Replace(signed, []byte("body line one"), []byte("body line ONE"), 1)
++	require.NotEqual(t, signed, tampered)
++
++	verifications, err := dkim.VerifyWithOptions(bytes.NewReader(tampered), &dkim.VerifyOptions{
++		LookupTXT: func(string) ([]string, error) { return []string{record}, nil },
++	})
++	require.NoError(t, err)
++	require.Len(t, verifications, 1)
++	assert.Error(t, verifications[0].Err, "a modified body must not verify")
++}
++
++func TestSignOutboundDKIMDisabled(t *testing.T) {
++	t.Cleanup(test.MockVariableValue(&setting.MailboxServer.DKIMEnabled, false))
++	signed, err := SignOutboundDKIM([]byte(testMessage))
++	require.NoError(t, err)
++	assert.Equal(t, testMessage, string(signed), "signing must be a no-op when disabled")
++}
++
++func TestParseDKIMPrivateKey(t *testing.T) {
++	t.Run("Ed25519", func(t *testing.T) {
++		_, priv, err := ed25519.GenerateKey(rand.Reader)
++		require.NoError(t, err)
++		der, err := x509.MarshalPKCS8PrivateKey(priv)
++		require.NoError(t, err)
++		signer, err := parseDKIMPrivateKey(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}))
++		require.NoError(t, err)
++		assert.IsType(t, ed25519.PublicKey{}, signer.Public())
++	})
++
++	t.Run("NotPEM", func(t *testing.T) {
++		_, err := parseDKIMPrivateKey([]byte("this is not a key"))
++		assert.ErrorContains(t, err, "not PEM encoded")
++	})
++
++	t.Run("UnsupportedType", func(t *testing.T) {
++		_, err := parseDKIMPrivateKey(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("garbage")}))
++		assert.Error(t, err)
++	})
++}
++
++func TestCanonicalization(t *testing.T) {
++	for value, expected := range map[string]dkim.Canonicalization{
++		"":        dkim.CanonicalizationRelaxed,
++		"relaxed": dkim.CanonicalizationRelaxed,
++		"simple":  dkim.CanonicalizationSimple,
++	} {
++		got, err := canonicalization(value)
++		require.NoError(t, err, value)
++		assert.Equal(t, expected, got, value)
++	}
++	_, err := canonicalization("bogus")
++	assert.ErrorContains(t, err, "unsupported value")
++}
++
++func TestDomainAligned(t *testing.T) {
++	cases := []struct {
++		auth, from string
++		mode       dmarc.AlignmentMode
++		aligned    bool
++	}{
++		{"example.com", "example.com", dmarc.AlignmentStrict, true},
++		{"mail.example.com", "example.com", dmarc.AlignmentStrict, false},
++		{"mail.example.com", "example.com", dmarc.AlignmentRelaxed, true},
++		{"example.com", "mail.example.com", dmarc.AlignmentRelaxed, true},
++		{"evil.com", "example.com", dmarc.AlignmentRelaxed, false},
++		// A shared public suffix is not an organizational match.
++		{"a.co.uk", "b.co.uk", dmarc.AlignmentRelaxed, false},
++		{"", "example.com", dmarc.AlignmentRelaxed, false},
++		{"example.com", "", dmarc.AlignmentRelaxed, false},
++	}
++	for _, c := range cases {
++		assert.Equal(t, c.aligned, domainAligned(c.auth, c.from, c.mode), "%s vs %s", c.auth, c.from)
++	}
++}
++
++func TestNormalizeDomain(t *testing.T) {
++	assert.Equal(t, "example.com", normalizeDomain("  Example.COM.  "))
++	assert.Equal(t, "xn--bcher-kva.example", normalizeDomain("Bücher.example"))
++	assert.Empty(t, normalizeDomain(""))
++}
++
++func TestRFC5322FromDomain(t *testing.T) {
++	domain, err := rfc5322FromDomain([]byte(testMessage))
++	require.NoError(t, err)
++	assert.Equal(t, "example.com", domain)
++
++	// DMARC is only defined for a single RFC5322.From mailbox.
++	_, err = rfc5322FromDomain([]byte("From: a@example.com, b@example.org\r\nSubject: x\r\n\r\nbody\r\n"))
++	assert.ErrorContains(t, err, "exactly one mailbox")
++
++	_, err = rfc5322FromDomain([]byte("Subject: no from header\r\n\r\nbody\r\n"))
++	assert.Error(t, err)
++}
++
++func TestSMTPIdentityDomain(t *testing.T) {
++	assert.Equal(t, "example.com", smtpIdentityDomain("bounce@example.com", "helo.example.net"))
++	// A null reverse path falls back to the HELO identity.
++	assert.Equal(t, "helo.example.net", smtpIdentityDomain("", "helo.example.net"))
++	assert.Equal(t, "192.0.2.1", smtpIdentityDomain("", "[192.0.2.1]"))
++}
++
++func TestDMARCSampleApplies(t *testing.T) {
++	pct := func(v int) *int { return &v }
++	assert.True(t, dmarcSampleApplies(&dmarc.Record{}, []byte("m"), nil))
++	assert.True(t, dmarcSampleApplies(&dmarc.Record{Percent: pct(100)}, []byte("m"), nil))
++	assert.False(t, dmarcSampleApplies(&dmarc.Record{Percent: pct(0)}, []byte("m"), nil))
++
++	// A partial percentage must be deterministic for the same message.
++	record := &dmarc.Record{Percent: pct(50)}
++	first := dmarcSampleApplies(record, []byte("message"), nil)
++	assert.Equal(t, first, dmarcSampleApplies(record, []byte("message"), nil))
++}
++
++func TestCleanAuthValue(t *testing.T) {
++	// Header injection and Authentication-Results field separators must not survive.
++	assert.Equal(t, "evil_ spf=pass", cleanAuthValue("evil;\r\n spf=pass"))
++	assert.Len(t, cleanAuthValue(string(make([]byte, 900))), 512)
++}
++
++func TestPrependMessageHeader(t *testing.T) {
++	assert.Equal(t, "X-A: b\r\nbody", string(prependMessageHeader([]byte("body"), "X-A: b")))
++	assert.Equal(t, "X-A: b\r\nbody", string(prependMessageHeader([]byte("body"), "X-A: b\r\n")))
++	assert.Equal(t, "body", string(prependMessageHeader([]byte("body"), "")))
++}
+diff --git a/services/mailbox/imap.go b/services/mailbox/imap.go
+index 45d2e21f20..f89c37cdc0 100644
+--- a/services/mailbox/imap.go
++++ b/services/mailbox/imap.go
+@@ -258,7 +258,7 @@ func (m *imapMailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.F
+ 		if seqSet != nil && !seqSet.Contains(id) {
+ 			continue
+ 		}
+-		fetched, markSeen, err := fetchIMAPMessage(stored, seqNum, items)
++		fetched, markSeen, err := fetchIMAPMessage(stored, seqNum, items, m.rawLoader(stored.ID))
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -274,19 +274,43 @@ func (m *imapMailbox) ListMessages(uid bool, seqSet *imap.SeqSet, items []imap.F
+ 	return nil
+ }
+ 
+-func fetchIMAPMessage(stored *mailbox_model.Message, seqNum uint32, items []imap.FetchItem) (*imap.Message, bool, error) {
++// rawLoader returns a loader that reads one message body at most once per FETCH,
++// so flag-only and UID-only fetches never touch the raw blob at all.
++func (m *imapMailbox) rawLoader(messageID int64) func() ([]byte, error) {
++	var (
++		raw    []byte
++		err    error
++		loaded bool
++	)
++	return func() ([]byte, error) {
++		if !loaded {
++			raw, err = mailbox_model.GetMessageRaw(m.ctx, m.user.ID, messageID)
++			loaded = true
++		}
++		return raw, err
++	}
++}
++
++func fetchIMAPMessage(stored *mailbox_model.Message, seqNum uint32, items []imap.FetchItem, loadRaw func() ([]byte, error)) (*imap.Message, bool, error) {
+ 	fetched := imap.NewMessage(seqNum, items)
+ 	markSeen := false
++	parse := func() (textproto.Header, io.Reader, error) {
++		raw, err := loadRaw()
++		if err != nil {
++			return textproto.Header{}, nil, err
++		}
++		return headerAndBody(raw)
++	}
+ 	for _, item := range items {
+ 		switch item {
+ 		case imap.FetchEnvelope:
+-			hdr, _, err := headerAndBody(stored.Raw)
++			hdr, _, err := parse()
+ 			if err != nil {
+ 				return nil, false, err
+ 			}
+ 			fetched.Envelope, _ = backendutil.FetchEnvelope(hdr)
+ 		case imap.FetchBody, imap.FetchBodyStructure:
+-			hdr, body, err := headerAndBody(stored.Raw)
++			hdr, body, err := parse()
+ 			if err != nil {
+ 				return nil, false, err
+ 			}
+@@ -304,7 +328,7 @@ func fetchIMAPMessage(stored *mailbox_model.Message, seqNum uint32, items []imap
+ 			if err != nil {
+ 				continue
+ 			}
+-			hdr, body, err := headerAndBody(stored.Raw)
++			hdr, body, err := parse()
+ 			if err != nil {
+ 				return nil, false, err
+ 			}
+@@ -334,7 +358,11 @@ func (m *imapMailbox) SearchMessages(uid bool, criteria *imap.SearchCriteria) ([
+ 	}
+ 	ids := make([]uint32, 0)
+ 	for i, stored := range msgs {
+-		entity, err := message.Read(bytes.NewReader(stored.Raw))
++		raw, err := mailbox_model.GetMessageRaw(m.ctx, m.user.ID, stored.ID)
++		if err != nil {
++			continue
++		}
++		entity, err := message.Read(bytes.NewReader(raw))
+ 		if err != nil {
+ 			continue
+ 		}
+diff --git a/services/mailbox/mailbox.go b/services/mailbox/mailbox.go
+index b337af0446..e4c794c438 100644
+--- a/services/mailbox/mailbox.go
++++ b/services/mailbox/mailbox.go
+@@ -27,7 +27,6 @@ import (
+ 	"gitea.dev/modules/log"
+ 	"gitea.dev/modules/setting"
+ 	"gitea.dev/modules/timeutil"
+-	auth_service "gitea.dev/services/auth"
+ 	incoming_service "gitea.dev/services/mailer/incoming"
+ 	sender_service "gitea.dev/services/mailer/sender"
+ 
+@@ -97,30 +96,73 @@ func ResolveRecipient(ctx context.Context, address string) (*user_model.User, er
+ 		baseLocal = baseLocal[:i]
+ 	}
+ 
+-	if alias, err := mailbox_model.FindAlias(ctx, local); err == nil {
+-		return user_model.GetUserByID(ctx, alias.UserID)
+-	}
+-	if alias, err := mailbox_model.FindAlias(ctx, baseLocal); err == nil {
+-		return user_model.GetUserByID(ctx, alias.UserID)
+-	}
+-
+-	user, err := user_model.GetIndividualUserByName(ctx, baseLocal)
+-	if err == nil {
++	// An account name always wins over an alias. AddAlias rejects local-parts that
++	// collide with a username, but an account registered after the alias would
++	// otherwise have its own mail silently delivered to the alias owner.
++	if user, err := user_model.GetIndividualUserByName(ctx, baseLocal); err == nil {
+ 		if !user.IsActive || user.ProhibitLogin {
+ 			return nil, ErrNotLocalRecipient
+ 		}
+ 		return user, nil
+ 	}
+ 
++	if alias, err := mailbox_model.FindAlias(ctx, local); err == nil {
++		return deliverableUser(ctx, alias.UserID)
++	}
++	if alias, err := mailbox_model.FindAlias(ctx, baseLocal); err == nil {
++		return deliverableUser(ctx, alias.UserID)
++	}
++
+ 	// Also allow a verified Gitea address on the hosted domain to be used as an
+ 	// inbound alias even when its local-part differs from the username.
+-	user, err = user_model.GetUserByEmail(ctx, parsed.Address)
++	user, err := user_model.GetUserByEmail(ctx, parsed.Address)
+ 	if err == nil && user != nil && user.IsIndividual() && user.IsActive && !user.ProhibitLogin {
+ 		return user, nil
+ 	}
++
++	// RFC 2142 requires postmaster and abuse to be reachable on a public domain.
++	if setting.MailboxServer.PostmasterUser != "" && isRoleAddress(baseLocal) {
++		if user, err := roleUser(ctx, setting.MailboxServer.PostmasterUser); err == nil {
++			return user, nil
++		}
++	}
++	if setting.MailboxServer.CatchAllUser != "" {
++		if user, err := roleUser(ctx, setting.MailboxServer.CatchAllUser); err == nil {
++			return user, nil
++		}
++	}
+ 	return nil, ErrNotLocalRecipient
+ }
+ 
++func isRoleAddress(localPart string) bool {
++	return localPart == "postmaster" || localPart == "abuse"
++}
++
++func roleUser(ctx context.Context, username string) (*user_model.User, error) {
++	user, err := user_model.GetIndividualUserByName(ctx, username)
++	if err != nil {
++		// Warn rather than error: a dictionary attack would otherwise flood the log
++		// on every unknown recipient when the configured account no longer exists.
++		log.Warn("Mailbox role account %q cannot be resolved: %v", username, err)
++		return nil, err
++	}
++	if !user.IsActive || user.ProhibitLogin {
++		return nil, ErrNotLocalRecipient
++	}
++	return user, nil
++}
++
++func deliverableUser(ctx context.Context, userID int64) (*user_model.User, error) {
++	user, err := user_model.GetUserByID(ctx, userID)
++	if err != nil {
++		return nil, err
++	}
++	if !user.IsIndividual() || !user.IsActive || user.ProhibitLogin {
++		return nil, ErrNotLocalRecipient
++	}
++	return user, nil
++}
++
+ func CanAcceptRecipient(ctx context.Context, address string, allowRelay bool) error {
+ 	parsed, err := mail.ParseAddress(strings.TrimSpace(address))
+ 	if err != nil {
+@@ -144,8 +186,23 @@ func CanAcceptRecipient(ctx context.Context, address string, allowRelay bool) er
+ 	return ErrNotLocalRecipient
+ }
+ 
++// SignInFunc validates a username/password pair for SMTP and IMAP logins.
++type SignInFunc func(ctx context.Context, username, password string) (*user_model.User, error)
++
++var signInFunc SignInFunc
++
++// SetSignInFunc wires the password authenticator used by SMTP AUTH and IMAP LOGIN.
++// It is injected instead of imported because services/auth transitively pulls in
++// services/mailer, which imports this package for local delivery.
++func SetSignInFunc(fn SignInFunc) {
++	signInFunc = fn
++}
++
+ func Authenticate(ctx context.Context, username, password string) (*user_model.User, error) {
+-	user, _, err := auth_service.UserSignIn(ctx, username, password)
++	if signInFunc == nil {
++		return nil, errors.New("mailbox authenticator is not initialized")
++	}
++	user, err := signInFunc(ctx, username, password)
+ 	if err != nil {
+ 		return nil, err
+ 	}
+@@ -176,9 +233,41 @@ func SenderAllowed(ctx context.Context, user *user_model.User, from string) bool
+ 	return err == nil && resolved != nil && resolved.ID == user.ID
+ }
+ 
++func validateMessageFrom(ctx context.Context, user *user_model.User, raw []byte) error {
++	message, err := mail.ReadMessage(bytes.NewReader(raw))
++	if err != nil {
++		return fmt.Errorf("parse RFC5322 message: %w", err)
++	}
++	from, err := message.Header.AddressList("From")
++	if err != nil {
++		return fmt.Errorf("parse RFC5322.From: %w", err)
++	}
++	if len(from) != 1 {
++		return fmt.Errorf("RFC5322.From must contain exactly one mailbox, got %d", len(from))
++	}
++	if !SenderAllowed(ctx, user, from[0].Address) {
++		return errors.New("RFC5322.From address is not owned by the authenticated user")
++	}
++	return nil
++}
++
++// DeliveryOptions controls how a raw message is routed after SMTP authentication.
++type DeliveryOptions struct {
++	AllowRelay   bool
++	LocalFolder  string
++	SkipHandlers bool
++}
++
+ // DeliverRaw stores all local recipient copies, dispatches tokenized Gitea replies,
+ // and relays non-local recipients through the existing [mailer] transport when allowed.
+ func DeliverRaw(ctx context.Context, envelopeFrom string, recipients []string, raw []byte, allowRelay bool) (*DeliveryResult, error) {
++	return DeliverRawWithOptions(ctx, envelopeFrom, recipients, raw, DeliveryOptions{AllowRelay: allowRelay})
++}
++
++// DeliverRawWithOptions is DeliverRaw with explicit local-folder and handler controls.
++// SkipHandlers is used for DMARC-quarantined mail so an unauthenticated message cannot
++// mutate an issue or pull request while it is being quarantined.
++func DeliverRawWithOptions(ctx context.Context, envelopeFrom string, recipients []string, raw []byte, opts DeliveryOptions) (*DeliveryResult, error) {
+ 	if setting.MailboxServer.MaxMessageSize > 0 && int64(len(raw)) > setting.MailboxServer.MaxMessageSize {
+ 		return nil, fmt.Errorf("message exceeds configured limit of %d bytes", setting.MailboxServer.MaxMessageSize)
+ 	}
+@@ -216,7 +305,7 @@ func DeliverRaw(ctx context.Context, envelopeFrom string, recipients []string, r
+ 			localUsers[user.ID] = user
+ 			continue
+ 		}
+-		if !allowRelay {
++		if !opts.AllowRelay {
+ 			return nil, fmt.Errorf("%w: %s", ErrNotLocalRecipient, parsed.Address)
+ 		}
+ 		if !setting.MailboxServer.RelayEnabled {
+@@ -235,19 +324,25 @@ func DeliverRaw(ctx context.Context, envelopeFrom string, recipients []string, r
+ 		}
+ 	}
+ 
++	localFolder := mailbox_model.NormalizeFolder(opts.LocalFolder)
++	if localFolder == "" {
++		localFolder = mailbox_model.FolderInbox
++	}
+ 	for _, user := range localUsers {
+-		if err := storeEnvelope(ctx, user, mailbox_model.FolderInbox, raw, env, false); err != nil {
++		if err := storeEnvelope(ctx, user, localFolder, raw, env, false); err != nil {
+ 			return nil, err
+ 		}
+ 		result.LocalUsers++
+ 	}
+ 
+-	for _, recipient := range handlerRecipients {
+-		handled, err := incoming_service.HandleReaderForAddress(ctx, bytes.NewReader(raw), recipient)
+-		if err != nil {
+-			return nil, err
++	if !opts.SkipHandlers {
++		for _, recipient := range handlerRecipients {
++			handled, err := incoming_service.HandleReaderForAddress(ctx, bytes.NewReader(raw), recipient)
++			if err != nil {
++				return nil, err
++			}
++			result.Handled = result.Handled || handled
+ 		}
+-		result.Handled = result.Handled || handled
+ 	}
+ 
+ 	if len(remote) > 0 {
+@@ -440,6 +535,10 @@ func ComposeAndSend(ctx context.Context, user *user_model.User, to, cc, bcc []st
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	raw, err = SignOutboundDKIM(raw)
++	if err != nil {
++		return nil, fmt.Errorf("sign outgoing message with DKIM: %w", err)
++	}
+ 	result, err := DeliverRaw(ctx, from, allRecipients, raw, true)
+ 	if err != nil {
+ 		return nil, err
+diff --git a/services/mailbox/server.go b/services/mailbox/server.go
+index b7ede6ee3e..8452c6322d 100644
+--- a/services/mailbox/server.go
++++ b/services/mailbox/server.go
+@@ -38,6 +38,10 @@ func Init(ctx context.Context) error {
+ 		return fmt.Errorf("[mailbox] DOMAIN must be configured when the mailbox server is enabled")
+ 	}
+ 
++	if err := initMessageAuthentication(); err != nil {
++		return err
++	}
++
+ 	tlsConfig, err := loadTLSConfig()
+ 	if err != nil {
+ 		return err
+diff --git a/services/mailbox/smtp.go b/services/mailbox/smtp.go
+index 5e2b32d1be..cb6e39b52d 100644
+--- a/services/mailbox/smtp.go
++++ b/services/mailbox/smtp.go
+@@ -17,12 +17,21 @@ import (
+ 	"strings"
+ 	"time"
+ 
++	mailbox_model "gitea.dev/models/mailbox"
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/log"
+ 	"gitea.dev/modules/setting"
+ )
+ 
+-const smtpSessionTimeout = 10 * time.Minute
++const (
++	smtpSessionTimeout = 10 * time.Minute
++	// RFC 5321 caps commands at 512 and text lines at 1000 octets. Both limits are
++	// raised here because real senders exceed them, while still bounding memory.
++	maxCommandLineSize = 64 * 1024
++	maxDataLineSize    = 1024 * 1024
++)
++
++var errLineTooLong = errors.New("SMTP line exceeds the maximum length")
+ 
+ type smtpListenerConfig struct {
+ 	addr        string
+@@ -40,6 +49,7 @@ type smtpSession struct {
+ 	implicitTLS bool
+ 	tlsActive   bool
+ 	helo        bool
++	heloName    string
+ 	user        *user_model.User
+ 	mailFrom    string
+ 	mailSet     bool
+@@ -129,14 +139,18 @@ func (s *smtpSession) serve() {
+ 		verb = strings.ToUpper(verb)
+ 		switch verb {
+ 		case "EHLO":
++			if !s.setHelo(arg) {
++				continue
++			}
+ 			s.resetTransaction()
+-			s.helo = true
+ 			if err := s.ehlo(arg); err != nil {
+ 				return
+ 			}
+ 		case "HELO":
++			if !s.setHelo(arg) {
++				continue
++			}
+ 			s.resetTransaction()
+-			s.helo = true
+ 			if err := s.reply(250, "%s", setting.MailboxServer.Hostname); err != nil {
+ 				return
+ 			}
+@@ -171,11 +185,33 @@ func (s *smtpSession) serve() {
+ }
+ 
+ func (s *smtpSession) readCommandLine() (string, error) {
+-	line, err := s.rw.ReadString('\n')
+-	if len(line) > 65536 {
+-		return "", errors.New("SMTP command line too long")
++	line, err := readLimitedLine(s.rw.Reader, maxCommandLineSize)
++	return trimLineEnding(line), err
++}
++
++// readLimitedLine reads one LF-terminated line without buffering more than limit
++// bytes, so a peer that never sends a newline cannot exhaust memory. ReadSlice
++// caps each chunk at the bufio buffer size, which bounds growth between checks.
++func readLimitedLine(r *bufio.Reader, limit int) (string, error) {
++	var sb strings.Builder
++	for {
++		chunk, err := r.ReadSlice('\n')
++		if sb.Len()+len(chunk) > limit {
++			return "", errLineTooLong
++		}
++		sb.Write(chunk)
++		if errors.Is(err, bufio.ErrBufferFull) {
++			continue
++		}
++		return sb.String(), err
+ 	}
+-	return strings.TrimRight(line, "\r\n"), err
++}
++
++// trimLineEnding removes exactly one CRLF or LF terminator. TrimRight would also
++// eat meaningful trailing CRs, which changes the bytes DKIM hashes.
++func trimLineEnding(line string) string {
++	line = strings.TrimSuffix(line, "\n")
++	return strings.TrimSuffix(line, "\r")
+ }
+ 
+ func (s *smtpSession) reply(code int, format string, args ...any) error {
+@@ -185,6 +221,17 @@ func (s *smtpSession) reply(code int, format string, args ...any) error {
+ 	return s.rw.Flush()
+ }
+ 
++func (s *smtpSession) setHelo(arg string) bool {
++	arg = strings.TrimSpace(arg)
++	if arg == "" || strings.ContainsAny(arg, "\r\n \t") {
++		_ = s.reply(501, "5.5.4 EHLO/HELO requires a single domain or address literal")
++		return false
++	}
++	s.helo = true
++	s.heloName = arg
++	return true
++}
++
+ func (s *smtpSession) ehlo(_ string) error {
+ 	caps := []string{
+ 		setting.MailboxServer.Hostname,
+@@ -234,6 +281,7 @@ func (s *smtpSession) startTLS() bool {
+ 	s.rw = bufio.NewReadWriter(bufio.NewReader(tlsConn), bufio.NewWriter(tlsConn))
+ 	s.tlsActive = true
+ 	s.helo = false
++	s.heloName = ""
+ 	s.user = nil
+ 	s.resetTransaction()
+ 	return true
+@@ -278,7 +326,7 @@ func (s *smtpSession) auth(arg string) {
+ 		if len(fields) > 1 {
+ 			username, err = decodeBase64String(fields[1])
+ 		} else {
+-			if err = s.reply(334, base64.StdEncoding.EncodeToString([]byte("Username:"))); err != nil {
++			if err = s.reply(334, "%s", base64.StdEncoding.EncodeToString([]byte("Username:"))); err != nil {
+ 				return
+ 			}
+ 			var line string
+@@ -288,7 +336,7 @@ func (s *smtpSession) auth(arg string) {
+ 			}
+ 		}
+ 		if err == nil {
+-			if err = s.reply(334, base64.StdEncoding.EncodeToString([]byte("Password:"))); err != nil {
++			if err = s.reply(334, "%s", base64.StdEncoding.EncodeToString([]byte("Password:"))); err != nil {
+ 				return
+ 			}
+ 			var line string
+@@ -434,17 +482,19 @@ func (s *smtpSession) data() {
+ 		if err := s.conn.SetDeadline(time.Now().Add(smtpSessionTimeout)); err != nil {
+ 			return
+ 		}
+-		line, err := s.rw.ReadString('\n')
++		line, err := readLimitedLine(s.rw.Reader, maxDataLineSize)
+ 		if err != nil {
++			if errors.Is(err, errLineTooLong) {
++				_ = s.reply(500, "5.5.2 Line too long")
++			}
+ 			return
+ 		}
+-		trimmed := strings.TrimRight(line, "\r\n")
++		trimmed := trimLineEnding(line)
+ 		if trimmed == "." {
+ 			break
+ 		}
+-		if strings.HasPrefix(trimmed, "..") {
+-			trimmed = trimmed[1:]
+-		}
++		// RFC 5321 4.5.2: a leading dot on any content line is transparency padding.
++		trimmed = strings.TrimPrefix(trimmed, ".")
+ 		if !tooLarge {
+ 			buf.WriteString(trimmed)
+ 			buf.WriteString("\r\n")
+@@ -459,8 +509,48 @@ func (s *smtpSession) data() {
+ 		return
+ 	}
+ 	allowRelay := s.user != nil && setting.MailboxServer.RelayEnabled
+-	raw := addReceivedHeader(buf.Bytes(), s.conn.RemoteAddr(), s.tlsActive)
+-	if _, err := DeliverRaw(s.ctx, s.mailFrom, s.recipients, raw, allowRelay); err != nil {
++	raw := buf.Bytes()
++	deliveryOptions := DeliveryOptions{AllowRelay: allowRelay}
++
++	if s.user == nil {
++		auth := authenticateIncoming(s.ctx, remoteIP(s.conn.RemoteAddr()), s.heloName, s.mailFrom, raw)
++		logInboundAuthentication(auth.Action, remoteIP(s.conn.RemoteAddr()), s.mailFrom)
++		switch auth.Action {
++		case inboundAuthDefer:
++			_ = s.reply(451, "4.7.5 Message authentication temporarily unavailable")
++			s.resetTransaction()
++			return
++		case inboundAuthReject:
++			_ = s.reply(550, "5.7.1 Message rejected by DMARC policy")
++			s.resetTransaction()
++			return
++		case inboundAuthQuarantine:
++			deliveryOptions.SkipHandlers = true
++			if setting.MailboxServer.DMARCQuarantineJunk {
++				deliveryOptions.LocalFolder = mailbox_model.FolderJunk
++			}
++		}
++		raw = prependMessageHeader(raw, auth.Header)
++		raw = addReceivedHeader(raw, s.conn.RemoteAddr(), s.tlsActive)
++	} else {
++		if err := validateMessageFrom(s.ctx, s.user, raw); err != nil {
++			log.Warn("Mailbox SMTP rejected unauthorized RFC5322.From for user %d: %v", s.user.ID, err)
++			_ = s.reply(553, "5.7.1 RFC5322.From address is not owned by authenticated user")
++			s.resetTransaction()
++			return
++		}
++		raw = addReceivedHeader(raw, s.conn.RemoteAddr(), s.tlsActive)
++		var err error
++		raw, err = SignOutboundDKIM(raw)
++		if err != nil {
++			log.Error("Mailbox SMTP DKIM signing failed for authenticated user %d: %v", s.user.ID, err)
++			_ = s.reply(451, "4.7.0 Temporary message signing failure")
++			s.resetTransaction()
++			return
++		}
++	}
++
++	if _, err := DeliverRawWithOptions(s.ctx, s.mailFrom, s.recipients, raw, deliveryOptions); err != nil {
+ 		log.Error("Mailbox SMTP delivery failed from %q to %v: %v", s.mailFrom, s.recipients, err)
+ 		if errors.Is(err, ErrQuotaExceeded) {
+ 			_ = s.reply(552, "5.2.2 Mailbox quota exceeded")
+@@ -474,6 +564,20 @@ func (s *smtpSession) data() {
+ 	s.resetTransaction()
+ }
+ 
++func remoteIP(remote net.Addr) net.IP {
++	if remote == nil {
++		return nil
++	}
++	if tcp, ok := remote.(*net.TCPAddr); ok {
++		return tcp.IP
++	}
++	host, _, err := net.SplitHostPort(remote.String())
++	if err != nil {
++		return net.ParseIP(remote.String())
++	}
++	return net.ParseIP(host)
++}
++
+ func addReceivedHeader(raw []byte, remote net.Addr, tlsActive bool) []byte {
+ 	remoteText := "unknown"
+ 	if remote != nil {
+diff --git a/services/mailbox/smtp_test.go b/services/mailbox/smtp_test.go
+new file mode 100644
+index 0000000000..3dea951088
+--- /dev/null
++++ b/services/mailbox/smtp_test.go
+@@ -0,0 +1,122 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package mailbox
++
++import (
++	"bufio"
++	"errors"
++	"io"
++	"strings"
++	"testing"
++
++	"github.com/stretchr/testify/assert"
++	"github.com/stretchr/testify/require"
++)
++
++func TestParseSMTPPath(t *testing.T) {
++	cases := []struct {
++		in         string
++		allowEmpty bool
++		want       string
++		wantErr    bool
++	}{
++		{in: "<user@example.com>", want: "user@example.com"},
++		{in: "<user@example.com> SIZE=1234", want: "user@example.com"},
++		{in: "<>", allowEmpty: true, want: ""},
++		{in: "<>", wantErr: true},
++		{in: "user@example.com", wantErr: true},
++		{in: "<user@example.com", wantErr: true},
++		// A display name is not an addr-spec and must be refused.
++		{in: "<Bob <bob@example.com>>", wantErr: true},
++		// A CR inside the path would let a peer inject a second command.
++		{in: "<user\r\nDATA@example.com>", wantErr: true},
++		// Trailing ESMTP parameters are discarded, so they cannot inject anything.
++		{in: "<user@example.com>\r\nDATA", want: "user@example.com"},
++	}
++	for _, c := range cases {
++		got, err := parseSMTPPath(c.in, c.allowEmpty)
++		if c.wantErr {
++			assert.Error(t, err, c.in)
++			continue
++		}
++		require.NoError(t, err, c.in)
++		assert.Equal(t, c.want, got, c.in)
++	}
++}
++
++func TestTrimLineEnding(t *testing.T) {
++	assert.Equal(t, "text", trimLineEnding("text\r\n"))
++	assert.Equal(t, "text", trimLineEnding("text\n"))
++	// Only one terminator is removed: extra CRs are body bytes that DKIM hashes.
++	assert.Equal(t, "text\r", trimLineEnding("text\r\r\n"))
++	assert.Equal(t, "text", trimLineEnding("text"))
++}
++
++func TestReadLimitedLine(t *testing.T) {
++	r := bufio.NewReader(strings.NewReader("first\r\nsecond\r\n"))
++	line, err := readLimitedLine(r, 1024)
++	require.NoError(t, err)
++	assert.Equal(t, "first\r\n", line)
++
++	line, err = readLimitedLine(r, 1024)
++	require.NoError(t, err)
++	assert.Equal(t, "second\r\n", line)
++
++	_, err = readLimitedLine(r, 1024)
++	assert.ErrorIs(t, err, io.EOF)
++}
++
++func TestReadLimitedLineRefusesOverlongLine(t *testing.T) {
++	// A peer that never sends a newline must not be able to grow the buffer.
++	_, err := readLimitedLine(bufio.NewReader(strings.NewReader(strings.Repeat("x", 200_000))), 1024)
++	assert.ErrorIs(t, err, errLineTooLong)
++}
++
++func TestDecodePlainAuth(t *testing.T) {
++	username, password, err := decodePlainAuth("AHVzZXIAcGFzcw==") // \0user\0pass
++	require.NoError(t, err)
++	assert.Equal(t, "user", username)
++	assert.Equal(t, "pass", password)
++
++	// An authorization identity different from the authentication identity is
++	// impersonation and must be refused.
++	_, _, err = decodePlainAuth("b3RoZXIAdXNlcgBwYXNz") // other\0user\0pass
++	assert.Error(t, err)
++
++	_, _, err = decodePlainAuth("bm90LWJhc2U2NC1zdHJ1Y3R1cmU=")
++	assert.Error(t, err)
++}
++
++// unstuffDataLines mirrors the DATA reader so the transparency rules can be
++// checked without a live connection.
++func unstuffDataLines(t *testing.T, data string) string {
++	t.Helper()
++	r := bufio.NewReader(strings.NewReader(data))
++	var out strings.Builder
++	for {
++		line, err := readLimitedLine(r, maxDataLineSize)
++		if err != nil && !errors.Is(err, io.EOF) {
++			t.Fatal(err)
++		}
++		trimmed := trimLineEnding(line)
++		if trimmed == "." {
++			break
++		}
++		trimmed = strings.TrimPrefix(trimmed, ".")
++		out.WriteString(trimmed)
++		out.WriteString("\r\n")
++		if errors.Is(err, io.EOF) {
++			break
++		}
++	}
++	return out.String()
++}
++
++func TestDataTransparency(t *testing.T) {
++	// RFC 5321 4.5.2: one leading dot is stripped from every content line.
++	assert.Equal(t, "body\r\n.stuffed\r\n", unstuffDataLines(t, "body\r\n..stuffed\r\n.\r\n"))
++	assert.Equal(t, "leading\r\n", unstuffDataLines(t, ".leading\r\n.\r\n"))
++	// A bare LF from a lax sender is normalized to CRLF before signing.
++	assert.Equal(t, "a\r\nb\r\n", unstuffDataLines(t, "a\nb\n.\r\n"))
++}
+diff --git a/services/mailer/mailbox_sender.go b/services/mailer/mailbox_sender.go
+index 5cb84d155f..5bc8e80644 100644
+--- a/services/mailer/mailbox_sender.go
++++ b/services/mailer/mailbox_sender.go
+@@ -48,7 +48,11 @@ func (s *mailboxAwareSender) Send(from string, to []string, msg io.WriterTo) err
+ 		remote = append(remote, recipient)
+ 	}
+ 
+-	wire := mailboxRawMessage(raw.Bytes())
++	signedRaw, err := mailbox_service.SignOutboundDKIM(raw.Bytes())
++	if err != nil {
++		return fmt.Errorf("sign Gitea mail with DKIM: %w", err)
++	}
++	wire := mailboxRawMessage(signedRaw)
+ 	// Relay first. Local delivery is Message-ID de-duplicated, so a queue retry
+ 	// after a partial failure cannot create repeated local copies.
+ 	if len(remote) > 0 {
+@@ -57,7 +61,7 @@ func (s *mailboxAwareSender) Send(from string, to []string, msg io.WriterTo) err
+ 		}
+ 	}
+ 	if len(local) > 0 {
+-		if _, err := mailbox_service.DeliverRaw(s.ctx, from, local, raw.Bytes(), false); err != nil {
++		if _, err := mailbox_service.DeliverRaw(s.ctx, from, local, signedRaw, false); err != nil {
+ 			return err
+ 		}
+ 	}
+diff --git a/templates/base/head_navbar.tmpl b/templates/base/head_navbar.tmpl
+index 7471da07f0..2a541f9a78 100644
+--- a/templates/base/head_navbar.tmpl
++++ b/templates/base/head_navbar.tmpl
+@@ -28,7 +28,7 @@
+ 			{{end}}
+ 			<a class="item{{if .PageIsExplore}} active{{end}}" href="{{AppSubUrl}}/explore/repos">{{ctx.Locale.Tr "explore_title"}}</a>
+ 			{{if .MailboxEnabled}}
+-				<a class="item{{if .PageIsMailbox}} active{{end}}" href="{{AppSubUrl}}/mail">{{svg "octicon-mail"}} Mail</a>
++				<a class="item{{if .PageIsMailbox}} active{{end}}" href="{{AppSubUrl}}/mail">{{svg "octicon-mail"}} {{ctx.Locale.Tr "mailbox.title"}}</a>
+ 			{{end}}
+ 		{{else if .IsLandingPageOrganizations}}
+ 			<a class="item{{if .PageIsExplore}} active{{end}}" href="{{AppSubUrl}}/explore/organizations">{{ctx.Locale.Tr "explore_title"}}</a>
+diff --git a/templates/mailbox/compose.tmpl b/templates/mailbox/compose.tmpl
+index a6c5e21e2f..525d72149c 100644
+--- a/templates/mailbox/compose.tmpl
++++ b/templates/mailbox/compose.tmpl
+@@ -4,20 +4,20 @@
+ 		<div class="ui stackable grid">
+ 			<div class="four wide column">{{template "mailbox/sidebar" .}}</div>
+ 			<div class="twelve wide column">
+-				<h2 class="ui header">Compose email</h2>
++				<h2 class="ui header">{{ctx.Locale.Tr "mailbox.compose_title"}}</h2>
+ 				{{if .ComposeError}}<div class="ui negative message">{{.ComposeError}}</div>{{end}}
+ 				<form class="ui form" method="post" action="{{AppSubUrl}}/mail/compose" enctype="multipart/form-data">
+-					<div class="field"><label>From</label><input value="{{.MailboxAddress}}" readonly></div>
+-					<div class="required field"><label>To</label><input name="to" value="{{.ComposeTo}}" autocomplete="off" placeholder="user@example.com, other@example.com"></div>
++					<div class="field"><label>{{ctx.Locale.Tr "mailbox.from"}}</label><input value="{{.MailboxAddress}}" readonly></div>
++					<div class="required field"><label>{{ctx.Locale.Tr "mailbox.to"}}</label><input name="to" value="{{.ComposeTo}}" autocomplete="off" placeholder="user@example.com, other@example.com"></div>
+ 					<div class="two fields">
+-						<div class="field"><label>Cc</label><input name="cc" value="{{.ComposeCc}}"></div>
+-						<div class="field"><label>Bcc</label><input name="bcc" value="{{.ComposeBcc}}"></div>
++						<div class="field"><label>{{ctx.Locale.Tr "mailbox.cc"}}</label><input name="cc" value="{{.ComposeCc}}"></div>
++						<div class="field"><label>{{ctx.Locale.Tr "mailbox.bcc"}}</label><input name="bcc" value="{{.ComposeBcc}}"></div>
+ 					</div>
+-					<div class="field"><label>Subject</label><input name="subject" value="{{.ComposeSubject}}"></div>
+-					<div class="field"><label>Message</label><textarea name="body" rows="16">{{.ComposeBody}}</textarea></div>
+-					<div class="field"><label>Attachments</label><input type="file" name="attachments" multiple></div>
+-					<button class="ui primary button" type="submit">{{svg "octicon-paper-airplane"}} Send</button>
+-					<a class="ui button" href="{{AppSubUrl}}/mail">Cancel</a>
++					<div class="field"><label>{{ctx.Locale.Tr "mailbox.subject"}}</label><input name="subject" value="{{.ComposeSubject}}"></div>
++					<div class="field"><label>{{ctx.Locale.Tr "mailbox.body"}}</label><textarea name="body" rows="16">{{.ComposeBody}}</textarea></div>
++					<div class="field"><label>{{ctx.Locale.Tr "mailbox.attachments"}}</label><input type="file" name="attachments" multiple></div>
++					<button class="ui primary button" type="submit">{{svg "octicon-paper-airplane"}} {{ctx.Locale.Tr "mailbox.send"}}</button>
++					<a class="ui button" href="{{AppSubUrl}}/mail">{{ctx.Locale.Tr "mailbox.cancel"}}</a>
+ 				</form>
+ 			</div>
+ 		</div>
+diff --git a/templates/mailbox/list.tmpl b/templates/mailbox/list.tmpl
+index 37cec652d7..ccb106c866 100644
+--- a/templates/mailbox/list.tmpl
++++ b/templates/mailbox/list.tmpl
+@@ -8,8 +8,8 @@
+ 					<h2 class="ui header tw-flex-1 tw-m-0">{{.MailboxFolder}}</h2>
+ 					<form method="get" action="{{AppSubUrl}}/mail" class="tw-flex tw-gap-2">
+ 						<input type="hidden" name="folder" value="{{.MailboxFolder}}">
+-						<div class="ui input"><input name="q" value="{{.MailboxQuery}}" placeholder="Search mail"></div>
+-						<button class="ui button" type="submit">{{svg "octicon-search"}} Search</button>
++						<div class="ui input"><input name="q" value="{{.MailboxQuery}}" placeholder="{{ctx.Locale.Tr "mailbox.search_placeholder"}}"></div>
++						<button class="ui button" type="submit">{{svg "octicon-search"}} {{ctx.Locale.Tr "mailbox.search"}}</button>
+ 					</form>
+ 				</div>
+ 				<div class="ui segment tw-p-0">
+@@ -20,12 +20,12 @@
+ 								<div class="tw-flex tw-items-center tw-gap-3">
+ 									<form method="post" action="{{AppSubUrl}}/mail/{{.ID}}/action">
+ 										<input type="hidden" name="action" value="{{if .Flagged}}unflag{{else}}flag{{end}}">
+-										<button class="ui basic icon button mini" type="submit" data-tooltip-content="Star">{{if .Flagged}}{{svg "octicon-star-fill"}}{{else}}{{svg "octicon-star"}}{{end}}</button>
++										<button class="ui basic icon button mini" type="submit" data-tooltip-content="{{if .Flagged}}{{ctx.Locale.Tr "mailbox.unstar"}}{{else}}{{ctx.Locale.Tr "mailbox.star"}}{{end}}">{{if .Flagged}}{{svg "octicon-star-fill"}}{{else}}{{svg "octicon-star"}}{{end}}</button>
+ 									</form>
+ 									<a class="tw-flex-1 tw-min-w-0" href="{{AppSubUrl}}/mail/{{.ID}}">
+ 										<div class="tw-flex tw-gap-2">
+ 											<span class="tw-w-1/4 tw-truncate">{{if .FromName}}{{.FromName}}{{else}}{{.FromAddress}}{{end}}</span>
+-											<span class="tw-flex-1 tw-truncate">{{if .Subject}}{{.Subject}}{{else}}(no subject){{end}}</span>
++											<span class="tw-flex-1 tw-truncate">{{if .Subject}}{{.Subject}}{{else}}{{ctx.Locale.Tr "mailbox.no_subject"}}{{end}}</span>
+ 											{{if .HasAttach}}{{svg "octicon-paperclip"}}{{end}}
+ 											<span class="muted">{{if .SentUnix}}{{DateUtils.TimeSince .SentUnix}}{{else}}{{DateUtils.TimeSince .ReceivedUnix}}{{end}}</span>
+ 										</div>
+@@ -35,7 +35,7 @@
+ 						{{end}}
+ 						</div>
+ 					{{else}}
+-						<div class="tw-p-8 tw-text-center muted">No messages in this folder.</div>
++						<div class="tw-p-8 tw-text-center muted">{{ctx.Locale.Tr "mailbox.no_messages"}}</div>
+ 					{{end}}
+ 				</div>
+ 				{{template "base/paginate" .}}
+diff --git a/templates/mailbox/settings.tmpl b/templates/mailbox/settings.tmpl
+index 4a7278e004..8efde07235 100644
+--- a/templates/mailbox/settings.tmpl
++++ b/templates/mailbox/settings.tmpl
+@@ -4,18 +4,18 @@
+ 		<div class="ui stackable grid">
+ 			<div class="four wide column">{{template "mailbox/sidebar" .}}</div>
+ 			<div class="twelve wide column">
+-				<h2 class="ui header">Mail settings</h2>
++				<h2 class="ui header">{{ctx.Locale.Tr "mailbox.settings"}}</h2>
+ 				<div class="ui segment">
+-					<h3 class="ui header">Mailbox address</h3>
++					<h3 class="ui header">{{ctx.Locale.Tr "mailbox.address"}}</h3>
+ 					<p><code>{{.MailboxAddress}}</code></p>
+-					<p class="muted">Use your Gitea username and password for authenticated SMTP submission and IMAP.</p>
++					<p class="muted">{{ctx.Locale.Tr "mailbox.address_help"}}</p>
+ 				</div>
+ 				<div class="ui segment">
+-					<h3 class="ui header">Folders</h3>
++					<h3 class="ui header">{{ctx.Locale.Tr "mailbox.folders"}}</h3>
+ 					<form class="ui form tw-mb-4" method="post" action="{{AppSubUrl}}/mail/settings/folders">
+ 						<div class="inline fields">
+ 							<div class="field"><input name="name" required maxlength="255" placeholder="Projects/Gitea"></div>
+-							<div class="field"><button class="ui primary button" type="submit">Create folder</button></div>
++							<div class="field"><button class="ui primary button" type="submit">{{ctx.Locale.Tr "mailbox.create_folder"}}</button></div>
+ 						</div>
+ 					</form>
+ 					<div class="ui divided list">
+@@ -24,30 +24,30 @@
+ 							<div class="content tw-flex-1">{{.Name}}</div>
+ 							<form method="post" action="{{AppSubUrl}}/mail/settings/folders/delete">
+ 								<input type="hidden" name="name" value="{{.Name}}">
+-								<button class="ui basic red mini button" type="submit">Delete</button>
++								<button class="ui basic red mini button" type="submit">{{ctx.Locale.Tr "mailbox.delete"}}</button>
+ 							</form>
+ 						</div>
+ 					{{else}}
+-						<div class="item muted">No custom folders configured.</div>
++						<div class="item muted">{{ctx.Locale.Tr "mailbox.no_custom_folders"}}</div>
+ 					{{end}}
+ 					</div>
+ 				</div>
+ 				<div class="ui segment">
+-					<h3 class="ui header">Aliases</h3>
++					<h3 class="ui header">{{ctx.Locale.Tr "mailbox.aliases"}}</h3>
+ 					<form class="ui form tw-mb-4" method="post" action="{{AppSubUrl}}/mail/settings/aliases">
+ 						<div class="inline fields">
+ 							<div class="field"><div class="ui right labeled input"><input name="local_part" required placeholder="alias"><div class="ui basic label">@{{.MailboxDomain}}</div></div></div>
+-							<div class="field"><button class="ui primary button" type="submit">Add alias</button></div>
++							<div class="field"><button class="ui primary button" type="submit">{{ctx.Locale.Tr "mailbox.add_alias"}}</button></div>
+ 						</div>
+ 					</form>
+ 					<div class="ui divided list">
+ 					{{range .MailboxAliases}}
+ 						<div class="item tw-flex tw-items-center">
+ 							<div class="content tw-flex-1"><code>{{.LocalPart}}@{{$.MailboxDomain}}</code></div>
+-							<form method="post" action="{{AppSubUrl}}/mail/settings/aliases/{{.ID}}/delete"><button class="ui basic red mini button" type="submit">Delete</button></form>
++							<form method="post" action="{{AppSubUrl}}/mail/settings/aliases/{{.ID}}/delete"><button class="ui basic red mini button" type="submit">{{ctx.Locale.Tr "mailbox.delete"}}</button></form>
+ 						</div>
+ 					{{else}}
+-						<div class="item muted">No aliases configured.</div>
++						<div class="item muted">{{ctx.Locale.Tr "mailbox.no_aliases"}}</div>
+ 					{{end}}
+ 					</div>
+ 				</div>
+diff --git a/templates/mailbox/sidebar.tmpl b/templates/mailbox/sidebar.tmpl
+index 0b41d4928e..3781139478 100644
+--- a/templates/mailbox/sidebar.tmpl
++++ b/templates/mailbox/sidebar.tmpl
+@@ -1,5 +1,5 @@
+ <div class="ui vertical secondary menu tw-w-full">
+-	<a class="ui primary button tw-mb-3" href="{{AppSubUrl}}/mail/compose">{{svg "octicon-pencil"}} Compose</a>
++	<a class="ui primary button tw-mb-3" href="{{AppSubUrl}}/mail/compose">{{svg "octicon-pencil"}} {{ctx.Locale.Tr "mailbox.compose"}}</a>
+ 	{{range .MailboxFolders}}
+ 		<a class="item{{if eq $.MailboxFolder .Name}} active{{end}}" href="{{AppSubUrl}}/mail?folder={{QueryEscape .Name}}">
+ 			{{if eq .Name "INBOX"}}{{svg "octicon-inbox"}}{{else if eq .Name "Sent"}}{{svg "octicon-paper-airplane"}}{{else if eq .Name "Drafts"}}{{svg "octicon-file"}}{{else if eq .Name "Trash"}}{{svg "octicon-trash"}}{{else if eq .Name "Archive"}}{{svg "octicon-archive"}}{{else}}{{svg "octicon-mail"}}{{end}}
+@@ -8,6 +8,6 @@
+ 		</a>
+ 	{{end}}
+ 	<div class="divider"></div>
+-	<a class="item" href="{{AppSubUrl}}/mail/settings">{{svg "octicon-gear"}} Mail settings</a>
++	<a class="item" href="{{AppSubUrl}}/mail/settings">{{svg "octicon-gear"}} {{ctx.Locale.Tr "mailbox.settings"}}</a>
+ 	<div class="item muted tw-break-all">{{.MailboxAddress}}</div>
+ </div>
+diff --git a/templates/mailbox/view.tmpl b/templates/mailbox/view.tmpl
+index cf0538ca22..a114b88f34 100644
+--- a/templates/mailbox/view.tmpl
++++ b/templates/mailbox/view.tmpl
+@@ -5,34 +5,34 @@
+ 			<div class="four wide column">{{template "mailbox/sidebar" .}}</div>
+ 			<div class="twelve wide column">
+ 				<div class="tw-flex tw-items-center tw-gap-2 tw-mb-3">
+-					<a class="ui basic button" href="{{AppSubUrl}}/mail?folder={{QueryEscape .Message.Folder}}">{{svg "octicon-arrow-left"}} Back</a>
+-					<a class="ui button" href="{{AppSubUrl}}/mail/compose?reply={{.Message.ID}}">{{svg "octicon-reply"}} Reply</a>
++					<a class="ui basic button" href="{{AppSubUrl}}/mail?folder={{QueryEscape .Message.Folder}}">{{svg "octicon-arrow-left"}} {{ctx.Locale.Tr "mailbox.back"}}</a>
++					<a class="ui button" href="{{AppSubUrl}}/mail/compose?reply={{.Message.ID}}">{{svg "octicon-reply"}} {{ctx.Locale.Tr "mailbox.reply"}}</a>
+ 					<form method="post" action="{{AppSubUrl}}/mail/{{.Message.ID}}/action">
+ 						<input type="hidden" name="action" value="{{if .Message.Flagged}}unflag{{else}}flag{{end}}">
+-						<button class="ui basic button" type="submit">{{if .Message.Flagged}}{{svg "octicon-star-fill"}} Unstar{{else}}{{svg "octicon-star"}} Star{{end}}</button>
++						<button class="ui basic button" type="submit">{{if .Message.Flagged}}{{svg "octicon-star-fill"}} {{ctx.Locale.Tr "mailbox.unstar"}}{{else}}{{svg "octicon-star"}} {{ctx.Locale.Tr "mailbox.star"}}{{end}}</button>
+ 					</form>
+ 					<form method="post" action="{{AppSubUrl}}/mail/{{.Message.ID}}/action">
+ 						<input type="hidden" name="action" value="delete">
+-						<button class="ui basic button" type="submit">{{svg "octicon-trash"}} Delete</button>
++						<button class="ui basic button" type="submit">{{svg "octicon-trash"}} {{ctx.Locale.Tr "mailbox.delete"}}</button>
+ 					</form>
+ 					<form class="ui form" method="post" action="{{AppSubUrl}}/mail/{{.Message.ID}}/action">
+ 						<input type="hidden" name="action" value="move">
+ 						<div class="inline field tw-m-0">
+ 							<select name="folder" class="ui dropdown" onchange="this.form.submit()">
+-								<option value="">Move to…</option>
++								<option value="">{{ctx.Locale.Tr "mailbox.move_to"}}</option>
+ 								{{range .MailboxFolders}}{{if ne .Name $.Message.Folder}}<option value="{{.Name}}">{{.Name}}</option>{{end}}{{end}}
+ 							</select>
+ 						</div>
+ 					</form>
+-					<a class="ui basic button" href="{{AppSubUrl}}/mail/{{.Message.ID}}/raw">{{svg "octicon-download"}} .eml</a>
++					<a class="ui basic button" href="{{AppSubUrl}}/mail/{{.Message.ID}}/raw">{{svg "octicon-download"}} {{ctx.Locale.Tr "mailbox.download_eml"}}</a>
+ 				</div>
+ 				<div class="ui segment">
+-					<h2 class="ui header">{{if .Message.Subject}}{{.Message.Subject}}{{else}}(no subject){{end}}</h2>
++					<h2 class="ui header">{{if .Message.Subject}}{{.Message.Subject}}{{else}}{{ctx.Locale.Tr "mailbox.no_subject"}}{{end}}</h2>
+ 					<div class="tw-flex tw-gap-2 tw-items-start tw-mb-4">
+ 						<div class="tw-flex-1">
+ 							<strong>{{if .Message.FromName}}{{.Message.FromName}}{{else}}{{.Message.FromAddress}}{{end}}</strong>
+ 							&lt;{{.Message.FromAddress}}&gt;<br>
+-							<span class="muted">To: {{.Message.To}}{{if .Message.Cc}} · Cc: {{.Message.Cc}}{{end}}</span>
++							<span class="muted">{{ctx.Locale.Tr "mailbox.to"}}: {{.Message.To}}{{if .Message.Cc}} · {{ctx.Locale.Tr "mailbox.cc"}}: {{.Message.Cc}}{{end}}</span>
+ 						</div>
+ 						<div class="muted">{{if .Message.SentUnix}}{{DateUtils.FullTime .Message.SentUnix}}{{else}}{{DateUtils.FullTime .Message.ReceivedUnix}}{{end}}</div>
+ 					</div>
+@@ -44,7 +44,7 @@
+ 					{{end}}
+ 					{{if .Attachments}}
+ 						<div class="ui divider"></div>
+-						<h4>Attachments</h4>
++						<h4>{{ctx.Locale.Tr "mailbox.attachments"}}</h4>
+ 						<div class="ui list">
+ 						{{range .Attachments}}
+ 							<a class="item" href="{{AppSubUrl}}/mail/{{$.Message.ID}}/attachment/{{.ID}}">{{svg "octicon-paperclip"}} {{.Filename}} <span class="muted">({{FileSize .Size}})</span></a>
+-- 
+2.55.0
+

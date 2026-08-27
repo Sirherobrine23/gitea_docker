@@ -1,0 +1,135 @@
+From fd532f0c0e10797d03e5fc374146aa1ff0349f49 Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Thu, 27 Aug 2026 10:47:29 -0300
+Subject: [PATCH 17/17] fix(issue): keep task-list checkboxes interactive and
+ fresh under live updates
+
+Assisted-by: opencode/big-pickle
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ pnpm-workspace.yaml                    |  3 +++
+ web_src/js/features/repo-issue-live.ts | 30 ++++++++++++++++++++++++++
+ web_src/js/markup/tasklist.ts          | 16 ++++++--------
+ 3 files changed, 40 insertions(+), 9 deletions(-)
+
+diff --git a/pnpm-workspace.yaml b/pnpm-workspace.yaml
+index b38f8e8eea..831056ce81 100644
+--- a/pnpm-workspace.yaml
++++ b/pnpm-workspace.yaml
+@@ -4,3 +4,6 @@ ignoreScripts: true
+ minimumReleaseAge: 0
+ confirmModulesPurge: false
+ verifyDepsBeforeRun: false
++allowBuilds:
++  esbuild: true
++  unrs-resolver: true
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index 3ae436a8a1..51cd57833e 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -2,6 +2,7 @@ import {Idiomorph} from 'idiomorph';
+ import {errorMessage} from '../modules/errors.ts';
+ import {request} from '../modules/fetch.ts';
+ import {showErrorToast} from '../modules/toast.ts';
++import {initMarkupTasklist} from '../markup/tasklist.ts';
+ import {
+   IssueLiveSharedWorker,
+   type IssueLiveClientMessage,
+@@ -30,6 +31,7 @@ type MorphOptionsWithCallbacks = {
+   morphStyle: 'innerHTML' | 'outerHTML',
+   callbacks: {
+     beforeNodeMorphed: (oldNode: Node, newNode: Node) => boolean,
++    beforeNodeRemoved?: (oldNode: Node) => boolean,
+   },
+ };
+ 
+@@ -198,6 +200,9 @@ function morphElement(existing: HTMLElement, incoming: HTMLElement) {
+       // Fomantic stores module state and handlers on these nodes. Preserve
+       // their identity; global observers initialize newly inserted controls.
+       beforeNodeMorphed: (oldNode: Node) => !(oldNode instanceof HTMLElement && oldNode.matches('.comment-header-right, .ui.dropdown')),
++      // .content-history-menu is created client-side (not in server HTML), so
++      // Idiomorph would remove it during the cleanup pass. Prevent removal.
++      beforeNodeRemoved: (oldNode: Node) => !(oldNode instanceof HTMLElement && oldNode.matches('.content-history-menu')),
+     },
+   };
+   Idiomorph.morph(existing, incoming, options);
+@@ -225,10 +230,35 @@ function morphCommentEntry(existing: HTMLElement, incoming: HTMLElement) {
+   const incomingHeaderLeft = incoming.querySelector<HTMLElement>('.comment-header-left');
+   if (existingHeaderLeft && incomingHeaderLeft) morphElement(existingHeaderLeft, incomingHeaderLeft);
+ 
++  // Save the current content_version before morph — a live update from an older
++  // edit can arrive after a newer POST response, overwriting the version.
++  const existingEditZone = existing.querySelector<HTMLElement>('.edit-content-zone');
++  const savedVersion = existingEditZone?.getAttribute('data-content-version');
++
+   const existingBody = existing.querySelector<HTMLElement>('.comment-body');
+   const incomingBody = incoming.querySelector<HTMLElement>('.comment-body');
+   if (existingBody && incomingBody) morphElement(existingBody, incomingBody);
+ 
++  // Restore the newer content_version if the morph overwrote it with an older one.
++  if (existingEditZone && savedVersion) {
++    const morphedVersion = existingEditZone.getAttribute('data-content-version');
++    if (!morphedVersion || Number(morphedVersion) < Number(savedVersion)) {
++      existingEditZone.setAttribute('data-content-version', savedVersion);
++    }
++  }
++
++  // Idiomorph mutates the .comment-body node in place (soft-match), so the
++  // MutationObserver never sees it in addedNodes and markup initializers
++  // (task-list checkboxes, code-copy, mermaid, math) are not re-run.
++  // Re-initialize explicitly on the morphed subtree. Also re-enable checkboxes
++  // because Idiomorph copies the server-rendered disabled="" attribute back.
++  for (const markup of existing.querySelectorAll<HTMLElement>('.render-content.markup')) {
++    initMarkupTasklist(markup);
++    for (const cb of markup.querySelectorAll<HTMLInputElement>('.task-list-item input[type=checkbox]')) {
++      cb.disabled = false;
++    }
++  }
++
+   syncBottomReactions(existing, incoming);
+ }
+ 
+diff --git a/web_src/js/markup/tasklist.ts b/web_src/js/markup/tasklist.ts
+index 557afeaea5..b034d60e4b 100644
+--- a/web_src/js/markup/tasklist.ts
++++ b/web_src/js/markup/tasklist.ts
+@@ -3,6 +3,10 @@ import {showErrorToast} from '../modules/toast.ts';
+ 
+ const preventListener = (e: Event) => e.preventDefault();
+ 
++// Track checkboxes that already have input listeners. WeakSet survives
++// Idiomorph morphs (which strip the JS-added data-editable attribute).
++const initializedCheckboxes = new WeakSet<HTMLInputElement>();
++
+ /**
+  * Toggle a task list checkbox in markdown content.
+  * `position` is the byte offset of the space or `x` character inside `[ ]`.
+@@ -34,11 +38,10 @@ export function initMarkupTasklist(elMarkup: HTMLElement): void {
+   const checkboxes = elMarkup.querySelectorAll<HTMLInputElement>(`.task-list-item input[type=checkbox]`);
+ 
+   for (const checkbox of checkboxes) {
+-    if (checkbox.hasAttribute('data-editable')) {
+-      return;
+-    }
++    if (initializedCheckboxes.has(checkbox)) continue;
+ 
+-    checkbox.setAttribute('data-editable', 'true');
++    initializedCheckboxes.add(checkbox);
++    checkbox.disabled = false;
+     checkbox.addEventListener('input', async () => {
+       const position = parseInt(checkbox.getAttribute('data-source-position')!) + 1;
+ 
+@@ -91,10 +94,5 @@ export function initMarkupTasklist(elMarkup: HTMLElement): void {
+         checkbox.removeEventListener('click', preventListener);
+       }
+     });
+-
+-    // Enable the checkboxes as they are initially disabled by the markdown renderer
+-    for (const checkbox of checkboxes) {
+-      checkbox.disabled = false;
+-    }
+   }
+ }
+-- 
+2.55.0
+
