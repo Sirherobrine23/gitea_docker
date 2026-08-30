@@ -1,4 +1,4 @@
-From 863a9a7ba69636bd9ca3bfe453f5bd9ea659e093 Mon Sep 17 00:00:00 2001
+From 65b4e817d3487cae6874b172b00f76d319c82022 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 18 Jul 2026 09:45:03 +0000
 Subject: [PATCH 06/17] fix: prevent live context recursion and blocker races

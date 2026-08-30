@@ -1,4 +1,4 @@
-From 973003c6b92734836c44641750bd7598e01572e5 Mon Sep 17 00:00:00 2001
+From 7a25f6d95d544fa6fd66e1578ec46c61d069e81c Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 00:43:39 +0000
 Subject: [PATCH 11/17] feat(mailbox): deliver remote mail directly to MX so
@@ -437,7 +437,7 @@ index 684366a9dc..7061f579dd 100644
  	}
  
 diff --git a/routers/web/admin/users.go b/routers/web/admin/users.go
-index f9ae597527..af015e4807 100644
+index 839ff70fb5..cf9d5e4a07 100644
 --- a/routers/web/admin/users.go
 +++ b/routers/web/admin/users.go
 @@ -97,7 +97,7 @@ func NewUser(ctx *context.Context) {
@@ -494,7 +494,7 @@ index bdc4a0396e..2acc74f7f9 100644
  		return
  	}
 diff --git a/routers/web/org/teams.go b/routers/web/org/teams.go
-index 233a8b1907..601ba316b9 100644
+index d93cbac0b9..2d26d1d89a 100644
 --- a/routers/web/org/teams.go
 +++ b/routers/web/org/teams.go
 @@ -29,6 +29,7 @@ import (
@@ -505,7 +505,7 @@ index 233a8b1907..601ba316b9 100644
  	org_service "gitea.dev/services/org"
  	repo_service "gitea.dev/services/repository"
  )
-@@ -174,7 +175,7 @@ func TeamsAction(ctx *context.Context) {
+@@ -173,7 +174,7 @@ func TeamsAction(ctx *context.Context) {
  		u, err = user_model.GetUserByName(ctx, uname)
  		if err != nil {
  			if user_model.IsErrUserNotExist(err) {
@@ -514,7 +514,7 @@ index 233a8b1907..601ba316b9 100644
  					if err := org_service.CreateTeamInvite(ctx, ctx.Doer, ctx.Org.Team, uname); err != nil {
  						if org_model.IsErrTeamInviteAlreadyExist(err) {
  							ctx.Flash.Error(ctx.Tr("form.duplicate_invite_to_team"))
-@@ -413,7 +414,7 @@ func TeamMembers(ctx *context.Context) {
+@@ -412,7 +413,7 @@ func TeamMembers(ctx *context.Context) {
  		return
  	}
  	ctx.Data["Invites"] = invites

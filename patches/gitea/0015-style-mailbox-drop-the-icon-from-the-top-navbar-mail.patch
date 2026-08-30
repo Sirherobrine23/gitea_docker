@@ -1,4 +1,4 @@
-From a100c66a1fb0a6087087c81ef585f5b2cc58e22a Mon Sep 17 00:00:00 2001
+From f5de5abc6d7a66dcec679c685938b09277eae26f Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:27:43 +0000
 Subject: [PATCH 15/17] style(mailbox): drop the icon from the top navbar mail

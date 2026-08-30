@@ -1,4 +1,4 @@
-From 60a69ec5ae6d25adf4221ce3cd896c384eaba1fd Mon Sep 17 00:00:00 2001
+From c412f11ea0f681b4e2a113ce83d68b00b9c71c89 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 01:56:58 +0000
 Subject: [PATCH 12/17] fix(mailbox): keep a mail identity from changing hands
@@ -211,10 +211,10 @@ index 8bc4eb62c8..27ce0369f5 100644
 +	assert.True(t, validLocalPart("old-name"))
 +}
 diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
-index c654581f6f..bf18be95b3 100644
+index 06a011d97c..d56a0b18dc 100644
 --- a/options/locale/locale_en-US.json
 +++ b/options/locale/locale_en-US.json
-@@ -544,8 +544,8 @@
+@@ -545,8 +545,8 @@
    "mailbox.create_folder": "Create folder",
    "mailbox.no_custom_folders": "No custom folders configured.",
    "mailbox.aliases": "Aliases",
@@ -224,7 +224,7 @@ index c654581f6f..bf18be95b3 100644
    "modal.yes": "Yes",
    "modal.no": "No",
    "modal.confirm": "Confirm",
-@@ -3503,6 +3503,22 @@
+@@ -3517,6 +3517,22 @@
    "admin.self_check.database_fix_mysql": "For MySQL/MariaDB users, you could use the \"gitea doctor convert\" command to fix the collation problems, or you could also fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries.",
    "admin.self_check.database_fix_mssql": "For MSSQL users, you could only fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries at the moment.",
    "admin.self_check.location_origin_mismatch": "Current URL (%[1]s) doesn't match the URL seen by Gitea (%[2]s). If you are using a reverse proxy, please make sure the \"Host\" and \"X-Forwarded-Proto\" headers are set correctly.",
@@ -375,7 +375,7 @@ index 381c42e07d..a28b796b93 100644
 -	ctx.Redirect(setting.AppSubURL + "/mail/settings")
 -}
 diff --git a/routers/web/web.go b/routers/web/web.go
-index 60b339d0c2..52fc66cda4 100644
+index 832b498738..1ec3a8ddf7 100644
 --- a/routers/web/web.go
 +++ b/routers/web/web.go
 @@ -810,6 +810,12 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
@@ -391,7 +391,7 @@ index 60b339d0c2..52fc66cda4 100644
  		m.Group("/users", func() {
  			m.Get("", admin.Users)
  			m.Combo("/new").Get(admin.NewUser).Post(web.Bind[*forms.AdminCreateUserForm](), admin.NewUserPost)
-@@ -1768,8 +1774,6 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+@@ -1770,8 +1776,6 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
  		m.Get("/settings", mailbox_router.Settings)
  		m.Post("/settings/folders", mailbox_router.CreateFolder)
  		m.Post("/settings/folders/delete", mailbox_router.DeleteFolder)

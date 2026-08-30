@@ -1,4 +1,4 @@
-From 7aaf884b068a547a093cf50aa3dde0fd08a0b617 Mon Sep 17 00:00:00 2001
+From 8fb42d789aadbfba6a8af6bff19e2aae0737b577 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 18 Aug 2026 22:02:27 +0000
 Subject: [PATCH 10/17] refactor(mailbox): serve SMTP with go-smtp instead of a
@@ -70,7 +70,7 @@ index 211fee02ba..4b3391b5e3 100644
  
  Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution, an outbound retry queue, bounce processing, reputation/greylisting, antivirus or content-spam filtering. DKIM signing plus inbound DKIM/SPF/DMARC authentication are native, but a production Internet mail deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the deployment boundary.
 diff --git a/go.mod b/go.mod
-index 6bcf2b190b..baba798705 100644
+index 638f21b51c..f5afe1cc86 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -42,6 +42,8 @@ require (
@@ -80,9 +80,9 @@ index 6bcf2b190b..baba798705 100644
 +	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
 +	github.com/emersion/go-smtp v0.25.0
  	github.com/emirpasic/gods v1.18.1
- 	github.com/ethantkoenig/rupture v1.0.1
  	github.com/felixge/fgprof v0.9.5
-@@ -179,7 +181,6 @@ require (
+ 	github.com/fsnotify/fsnotify v1.10.1
+@@ -177,7 +179,6 @@ require (
  	github.com/cyphar/filepath-securejoin v0.6.1 // indirect
  	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
  	github.com/davidmz/go-pageant v1.0.2 // indirect
@@ -91,10 +91,10 @@ index 6bcf2b190b..baba798705 100644
  	github.com/fxamacker/cbor/v2 v2.9.2 // indirect
  	github.com/git-lfs/pktline v0.0.0-20230103162542-ca444d533ef1 // indirect
 diff --git a/go.sum b/go.sum
-index bdd8645e74..64acd77bff 100644
+index 6c5f26d742..3d1860427c 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -263,6 +263,8 @@ github.com/emersion/go-msgauth v0.7.0/go.mod h1:mmS9I6HkSovrNgq0HNXTeu8l3sRAAuQ9
+@@ -235,6 +235,8 @@ github.com/emersion/go-msgauth v0.7.0/go.mod h1:mmS9I6HkSovrNgq0HNXTeu8l3sRAAuQ9
  github.com/emersion/go-sasl v0.0.0-20200509203442-7bfe0ed36a21/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=
  github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 h1:oP4q0fw+fOSWn3DfFi4EXdT+B+gTtzx8GC9xsc26Znk=
  github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6/go.mod h1:iL2twTeMvZnrg54ZoPDNfJaJaqy0xIQFuBdrLsmspwQ=

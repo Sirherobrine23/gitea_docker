@@ -1,4 +1,4 @@
-From 3ef96fc324cdfd2ecc10f02ca97323d9983f0dad Mon Sep 17 00:00:00 2001
+From cfd88b9b29948f0a160f2f14e6d42c9e548ad0ad Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:15:36 +0000
 Subject: [PATCH 14/17] refactor(mailbox): move IMAP server and incoming client
@@ -78,7 +78,7 @@ index 179d0f0e0a..be656057e0 100644
  
  MX resolution, opportunistic TLS, deferral retries and delivery status notices are native. Not implemented: full RFC 3464 DSN bodies (the notice is a plain-text message), inbound greylisting, reputation scoring, antivirus and content-spam filtering. A production Internet deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the boundary.
 diff --git a/go.mod b/go.mod
-index baba798705..d8e26f0969 100644
+index f5afe1cc86..1a3cf23007 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,8 +39,8 @@ require (
@@ -93,11 +93,11 @@ index baba798705..d8e26f0969 100644
  	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
  	github.com/emersion/go-smtp v0.25.0
 diff --git a/go.sum b/go.sum
-index 64acd77bff..9c31d48ce2 100644
+index 3d1860427c..9272df41d4 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -253,19 +253,16 @@ github.com/editorconfig/editorconfig-core-go/v2 v2.6.4/go.mod h1:JWRVKHdVW+dkv6F
- github.com/elazarl/go-bindata-assetfs v1.0.1/go.mod h1:v+YaWX3bdea5J/mo8dSETolEo7R71Vk1u8bnjau5yw4=
+@@ -225,19 +225,16 @@ github.com/editorconfig/editorconfig-core-go/v2 v2.6.4 h1:CHwUbBVVyKWRX9kt5A/Otw
+ github.com/editorconfig/editorconfig-core-go/v2 v2.6.4/go.mod h1:JWRVKHdVW+dkv6F8p+xGCa6a+TyMrqsFbFkSs/aQkrQ=
  github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o=
  github.com/elazarl/goproxy v1.7.2/go.mod h1:82vkLNir0ALaW14Rc399OTTjyNREgmdL2cVoIbS6XaE=
 -github.com/emersion/go-imap v1.2.1 h1:+s9ZjMEjOB8NzZMVTM3cCenz2JrQIGGo5j1df19WjTA=
@@ -119,7 +119,7 @@ index 64acd77bff..9c31d48ce2 100644
 -github.com/emersion/go-textwrapper v0.0.0-20200911093747-65d896831594/go.mod h1:aqO8z8wPrjkscevZJFVE1wXJrLpC5LtJG7fqLOsPb2U=
  github.com/emirpasic/gods v1.18.1 h1:FXtiHYKDGKCW2KzwZKx0iC0PQmdlorYgdFG9jPXJ1Bc=
  github.com/emirpasic/gods v1.18.1/go.mod h1:8tpGGwCnJ5H4r6BWwaV6OrWmMoPhUl5jm/FMNAnJvWQ=
- github.com/ethantkoenig/rupture v1.0.1 h1:6aAXghmvtnngMgQzy7SMGdicMvkV86V4n9fT0meE5E4=
+ github.com/fatih/color v1.19.0 h1:Zp3PiM21/9Ld6FzSKyL5c/BULoe/ONr9KlbYVOfG8+w=
 diff --git a/services/mailbox/imap.go b/services/mailbox/imap.go
 index e127002bf4..ffa462e0ba 100644
 --- a/services/mailbox/imap.go

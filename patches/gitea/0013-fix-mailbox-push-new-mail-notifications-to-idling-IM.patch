@@ -1,4 +1,4 @@
-From 5b4412ceb92ada0bf5827c01c108dab1f39216ec Mon Sep 17 00:00:00 2001
+From a614fab5332f2e501d7de2f4701961288f815951 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:02:07 +0000
 Subject: [PATCH 13/17] fix(mailbox): push new-mail notifications to idling

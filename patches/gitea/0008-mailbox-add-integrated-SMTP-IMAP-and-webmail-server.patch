@@ -1,4 +1,4 @@
-From d6628637701dd64b18f30c9ffc29da6a86371ae0 Mon Sep 17 00:00:00 2001
+From 9bacfb2a6d753a90d8c2b69285af8e7168c3d70c Mon Sep 17 00:00:00 2001
 From: OpenAI <noreply@openai.com>
 Date: Mon, 17 Aug 2026 04:24:23 +0000
 Subject: [PATCH 08/17] mailbox: add integrated SMTP, IMAP and webmail server
@@ -115,7 +115,7 @@ index 0000000000..68e782c76c
 +
 +Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution and direct-to-MX queueing. DKIM signing, SPF/DMARC evaluation, reputation/greylisting, antivirus and spam filtering are therefore expected to be supplied by the configured outbound/inbound edge when those controls are required for an Internet-exposed production deployment.
 diff --git a/go.mod b/go.mod
-index 6492011acc..d18f57c89b 100644
+index abbe9d9673..dcea46fce9 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,6 +39,7 @@ require (
@@ -124,13 +124,13 @@ index 6492011acc..d18f57c89b 100644
  	github.com/emersion/go-imap v1.2.1
 +	github.com/emersion/go-message v0.15.0
  	github.com/emirpasic/gods v1.18.1
- 	github.com/ethantkoenig/rupture v1.0.1
  	github.com/felixge/fgprof v0.9.5
+ 	github.com/fsnotify/fsnotify v1.10.1
 diff --git a/go.sum b/go.sum
-index aa73f76056..aca12acb49 100644
+index d6480480b8..b62f54d081 100644
 --- a/go.sum
 +++ b/go.sum
-@@ -253,6 +253,7 @@ github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o
+@@ -225,6 +225,7 @@ github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o
  github.com/elazarl/goproxy v1.7.2/go.mod h1:82vkLNir0ALaW14Rc399OTTjyNREgmdL2cVoIbS6XaE=
  github.com/emersion/go-imap v1.2.1 h1:+s9ZjMEjOB8NzZMVTM3cCenz2JrQIGGo5j1df19WjTA=
  github.com/emersion/go-imap v1.2.1/go.mod h1:Qlx1FSx2FTxjnjWpIlVNEuX+ylerZQNFE5NsmKFSejY=
@@ -985,7 +985,7 @@ index 0fa259225a..bd131d6cdc 100644
  	loadNotifyMailFrom(rootCfg)
  	loadIncomingEmailFrom(rootCfg)
 diff --git a/routers/init.go b/routers/init.go
-index 483b61726a..887fd5467c 100644
+index c4e415893b..4533d5b4f9 100644
 --- a/routers/init.go
 +++ b/routers/init.go
 @@ -40,6 +40,7 @@ import (
@@ -1383,7 +1383,7 @@ index 0000000000..516fc52518
 +	ctx.Redirect(setting.AppSubURL + "/mail/settings")
 +}
 diff --git a/routers/web/web.go b/routers/web/web.go
-index d07a154152..60b339d0c2 100644
+index 63f187508e..832b498738 100644
 --- a/routers/web/web.go
 +++ b/routers/web/web.go
 @@ -31,6 +31,7 @@ import (
@@ -1394,7 +1394,7 @@ index d07a154152..60b339d0c2 100644
  	"gitea.dev/routers/web/misc"
  	"gitea.dev/routers/web/org"
  	"gitea.dev/routers/web/repo"
-@@ -1760,6 +1761,21 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+@@ -1762,6 +1763,21 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
  	// pattern: "/{username}/{reponame}/{git-paths}": git http support
  	addOwnerRepoGitHTTPRouters(m, repo.HTTPGitEnabledHandler, webAuth.AllowBasic, webAuth.AllowOAuth2, webAuth.AllowDeployToken, repo.CorsHandler(), optSignInFromAnyOrigin, context.UserAssignmentWeb())
  
