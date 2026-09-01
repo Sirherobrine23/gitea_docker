@@ -1,7 +1,7 @@
-From b2ad4a63a05b67c12b84daa8495f9af710ad87d4 Mon Sep 17 00:00:00 2001
+From 6772e9c44970d5a555961b07782c02bde1ad8738 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
-Subject: [PATCH 04/17] feat: add efficient live issue updates
+Subject: [PATCH 04/18] feat: add efficient live issue updates
 
 Avoid re-rendering the complete timeline every two seconds and do not morph
 all comments when a page first opens. Use mutation invalidations for common
@@ -33,7 +33,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  create mode 100644 web_src/js/features/repo-issue-live.ts
 
 diff --git a/routers/web/repo/issue.go b/routers/web/repo/issue.go
-index 67e944a323..d66139ab2f 100644
+index b7241ee0b5..13306f94cc 100644
 --- a/routers/web/repo/issue.go
 +++ b/routers/web/repo/issue.go
 @@ -295,6 +295,7 @@ func UpdateIssueTitle(ctx *context.Context) {
@@ -93,7 +93,7 @@ index 67e944a323..d66139ab2f 100644
  		ctx.JSON(http.StatusOK, map[string]any{
  			"empty": true,
 diff --git a/routers/web/repo/issue_comment.go b/routers/web/repo/issue_comment.go
-index dd7ba66e5c..8e0cf578d1 100644
+index df90827754..e61ad7f9ca 100644
 --- a/routers/web/repo/issue_comment.go
 +++ b/routers/web/repo/issue_comment.go
 @@ -183,6 +183,7 @@ func NewComment(ctx *context.Context) {

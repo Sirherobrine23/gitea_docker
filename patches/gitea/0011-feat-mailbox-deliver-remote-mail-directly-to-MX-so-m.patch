@@ -1,7 +1,7 @@
-From 7a25f6d95d544fa6fd66e1578ec46c61d069e81c Mon Sep 17 00:00:00 2001
+From b498c6fa9877401c6873b4b50954eb71b39cfcdc Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 00:43:39 +0000
-Subject: [PATCH 11/17] feat(mailbox): deliver remote mail directly to MX so
+Subject: [PATCH 11/18] feat(mailbox): deliver remote mail directly to MX so
  [mailer] is optional
 
 The integrated server could host mailboxes but still leaned on the [mailer]
@@ -80,7 +80,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  create mode 100644 services/mailbox/outbound_test.go
 
 diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
-index 104598c6f9..4cc2f1d248 100644
+index ba2c943312..828aa82535 100644
 --- a/custom/conf/app.example.ini
 +++ b/custom/conf/app.example.ini
 @@ -1986,9 +1986,34 @@ LEVEL = Info

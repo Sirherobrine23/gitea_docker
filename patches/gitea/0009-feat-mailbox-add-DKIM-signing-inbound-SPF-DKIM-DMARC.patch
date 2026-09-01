@@ -1,7 +1,7 @@
-From 358616bd5597aa178dda425fce4964192ccb2bc7 Mon Sep 17 00:00:00 2001
+From 61ac4f0ab47a304b94635ebe425d7b9ebc792f93 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 18 Aug 2026 21:54:16 +0000
-Subject: [PATCH 09/17] feat(mailbox): add DKIM signing, inbound SPF/DKIM/DMARC
+Subject: [PATCH 09/18] feat(mailbox): add DKIM signing, inbound SPF/DKIM/DMARC
  and server hardening
 
 Builds on the integrated mailbox server to replace the external
@@ -83,7 +83,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  create mode 100644 services/mailbox/smtp_test.go
 
 diff --git a/custom/conf/app.example.ini b/custom/conf/app.example.ini
-index 86631be700..104598c6f9 100644
+index c46fb6bbb6..ba2c943312 100644
 --- a/custom/conf/app.example.ini
 +++ b/custom/conf/app.example.ini
 @@ -1945,6 +1945,87 @@ LEVEL = Info
@@ -281,7 +281,7 @@ index 68e782c76c..211fee02ba 100644
 -Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution and direct-to-MX queueing. DKIM signing, SPF/DMARC evaluation, reputation/greylisting, antivirus and spam filtering are therefore expected to be supplied by the configured outbound/inbound edge when those controls are required for an Internet-exposed production deployment.
 +Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution, an outbound retry queue, bounce processing, reputation/greylisting, antivirus or content-spam filtering. DKIM signing plus inbound DKIM/SPF/DMARC authentication are native, but a production Internet mail deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the deployment boundary.
 diff --git a/go.mod b/go.mod
-index dcea46fce9..638f21b51c 100644
+index 77e55f6445..a513d98dd5 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -5,6 +5,7 @@ go 1.27
@@ -312,7 +312,7 @@ index dcea46fce9..638f21b51c 100644
  	xorm.io/xorm v1.4.1
  )
 diff --git a/go.sum b/go.sum
-index b62f54d081..6c5f26d742 100644
+index 28fee89486..bd5b0da0d0 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -1,3 +1,5 @@

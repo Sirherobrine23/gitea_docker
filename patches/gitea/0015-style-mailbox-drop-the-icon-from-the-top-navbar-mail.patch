@@ -1,7 +1,7 @@
-From f5de5abc6d7a66dcec679c685938b09277eae26f Mon Sep 17 00:00:00 2001
+From a5248a9efdfa0ab147c5fac7d1c6ab7fe4a90688 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:27:43 +0000
-Subject: [PATCH 15/17] style(mailbox): drop the icon from the top navbar mail
+Subject: [PATCH 15/18] style(mailbox): drop the icon from the top navbar mail
  link
 
 The neighbouring top-level links (Issues, Pull Requests, Milestones, Explore)

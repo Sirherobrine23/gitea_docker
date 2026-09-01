@@ -1,0 +1,91 @@
+From 1216b588a016700a977891861e9db37f7f4f822d Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Tue, 1 Sep 2026 11:07:48 -0300
+Subject: [PATCH 18/18] fixers
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/web/mailbox/mailbox.go | 3 +--
+ templates/mailbox/view.tmpl    | 6 +++---
+ web_src/js/features/mailbox.ts | 7 +++++++
+ web_src/js/index.ts            | 3 +++
+ 4 files changed, 14 insertions(+), 5 deletions(-)
+ create mode 100644 web_src/js/features/mailbox.ts
+
+diff --git a/routers/web/mailbox/mailbox.go b/routers/web/mailbox/mailbox.go
+index a28b796b93..147e73e933 100644
+--- a/routers/web/mailbox/mailbox.go
++++ b/routers/web/mailbox/mailbox.go
+@@ -76,8 +76,7 @@ func List(ctx *context.Context) {
+ 		ctx.ServerError("ListMessages", err)
+ 		return
+ 	}
+-	pager := context.NewPagination(total, pageSize, page, 5)
+-	pager.AddParamFromRequest(ctx.Req)
++	pager := context.NewPagerBuilder(ctx).TotalCount(total).PerPageLimit(pageSize).CurPage(page).NavPageNum(5).Build()
+ 	ctx.Data["Messages"] = messages
+ 	ctx.Data["MailboxFolder"] = folder
+ 	ctx.Data["MailboxQuery"] = ctx.FormString("q")
+diff --git a/templates/mailbox/view.tmpl b/templates/mailbox/view.tmpl
+index a114b88f34..aabdc97329 100644
+--- a/templates/mailbox/view.tmpl
++++ b/templates/mailbox/view.tmpl
+@@ -15,10 +15,10 @@
+ 						<input type="hidden" name="action" value="delete">
+ 						<button class="ui basic button" type="submit">{{svg "octicon-trash"}} {{ctx.Locale.Tr "mailbox.delete"}}</button>
+ 					</form>
+-					<form class="ui form" method="post" action="{{AppSubUrl}}/mail/{{.Message.ID}}/action">
++					<form class="ui form ignore-dirty" method="post" action="{{AppSubUrl}}/mail/{{.Message.ID}}/action" data-global-init="initMailboxMoveForm">
+ 						<input type="hidden" name="action" value="move">
+ 						<div class="inline field tw-m-0">
+-							<select name="folder" class="ui dropdown" onchange="this.form.submit()">
++							<select name="folder" class="ui selection dropdown">
+ 								<option value="">{{ctx.Locale.Tr "mailbox.move_to"}}</option>
+ 								{{range .MailboxFolders}}{{if ne .Name $.Message.Folder}}<option value="{{.Name}}">{{.Name}}</option>{{end}}{{end}}
+ 							</select>
+@@ -47,7 +47,7 @@
+ 						<h4>{{ctx.Locale.Tr "mailbox.attachments"}}</h4>
+ 						<div class="ui list">
+ 						{{range .Attachments}}
+-							<a class="item" href="{{AppSubUrl}}/mail/{{$.Message.ID}}/attachment/{{.ID}}">{{svg "octicon-paperclip"}} {{.Filename}} <span class="muted">({{FileSize .Size}})</span></a>
++							<a class="item" href="{{AppSubUrl}}/mail/{{$.Message.ID}}/attachment/{{.ID}}">{{svg "octicon-paperclip"}} {{.Filename}} <span class="muted">({{FormatByteSize .Size}})</span></a>
+ 						{{end}}
+ 						</div>
+ 					{{end}}
+diff --git a/web_src/js/features/mailbox.ts b/web_src/js/features/mailbox.ts
+new file mode 100644
+index 0000000000..10555bdbfe
+--- /dev/null
++++ b/web_src/js/features/mailbox.ts
+@@ -0,0 +1,7 @@
++import {registerGlobalInitFunc} from '../modules/observer.ts';
++
++export function initMailboxMoveForm() {
++  registerGlobalInitFunc('initMailboxMoveForm', (form: HTMLFormElement) => {
++    form.querySelector('select[name="folder"]')!.addEventListener('change', () => form.submit());
++  });
++}
+diff --git a/web_src/js/index.ts b/web_src/js/index.ts
+index ba07ff3185..49786bbe12 100644
+--- a/web_src/js/index.ts
++++ b/web_src/js/index.ts
+@@ -68,6 +68,7 @@ import {initGlobalShortcut} from './modules/shortcut.ts';
+ import {initDevtest} from './modules/devtest.ts';
+ import {initRepoWatch} from './features/repo-watch.ts';
+ import {initPackagesView} from './features/packages.ts';
++import {initMailboxMoveForm} from './features/mailbox.ts';
+ 
+ const initStartTime = performance.now();
+ const initPerformanceTracer = callInitFunctions([
+@@ -165,6 +166,8 @@ const initPerformanceTracer = callInitFunctions([
+   initRepoFileView,
+   initActionsPermissionsForm,
+ 
++  initMailboxMoveForm,
++
+   initDevtest,
+ ]);
+ 
+-- 
+2.55.0
+

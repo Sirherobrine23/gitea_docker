@@ -1,7 +1,7 @@
-From 65b4e817d3487cae6874b172b00f76d319c82022 Mon Sep 17 00:00:00 2001
+From 9cc54a94a0d548b262fe7caf9d632fbfc31e3c58 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 18 Jul 2026 09:45:03 +0000
-Subject: [PATCH 06/17] fix: prevent live context recursion and blocker races
+Subject: [PATCH 06/18] fix: prevent live context recursion and blocker races
 
 Clone the web context before attaching the shutdown-aware request context so the original Base does not become its own context ancestor. Build blocker maps off-path and atomically publish them under an RWMutex to avoid concurrent map iteration/write crashes without holding request handling during RDAP/WHOIS refreshes.
 

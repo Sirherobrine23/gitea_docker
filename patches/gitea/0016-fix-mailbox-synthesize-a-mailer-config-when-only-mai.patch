@@ -1,7 +1,7 @@
-From 2919ee3938c9f0f047ca54532207799455e9a588 Mon Sep 17 00:00:00 2001
+From 7efc1dae2e0476cb94deeb51ce2384a6e909fee6 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:35:29 +0000
-Subject: [PATCH 16/17] fix(mailbox): synthesize a mailer config when only
+Subject: [PATCH 16/18] fix(mailbox): synthesize a mailer config when only
  [mailbox] is configured
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8
@@ -53,7 +53,7 @@ index be656057e0..71a1e54b02 100644
  When `[email.incoming] LOCAL_DELIVERY = true`, tokenized reply-by-email addresses are consumed directly by the integrated SMTP listener. The existing incoming-mail token decoder and issue/pull-request handlers are reused; the external IMAP polling loop is disabled.
  
 diff --git a/modules/setting/mailer.go b/modules/setting/mailer.go
-index bd131d6cdc..192025b9c8 100644
+index b881983f7c..1acdbc1066 100644
 --- a/modules/setting/mailer.go
 +++ b/modules/setting/mailer.go
 @@ -5,6 +5,7 @@ package setting

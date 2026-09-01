@@ -1,7 +1,7 @@
-From c412f11ea0f681b4e2a113ce83d68b00b9c71c89 Mon Sep 17 00:00:00 2001
+From 0e0d673db1bf44f84fdb969682f1d81c4b7fc5ab Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 01:56:58 +0000
-Subject: [PATCH 12/17] fix(mailbox): keep a mail identity from changing hands
+Subject: [PATCH 12/18] fix(mailbox): keep a mail identity from changing hands
  on username reuse
 MIME-Version: 1.0
 Content-Type: text/plain; charset=UTF-8

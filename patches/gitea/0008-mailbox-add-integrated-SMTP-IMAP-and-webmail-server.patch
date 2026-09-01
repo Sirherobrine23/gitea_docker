@@ -1,7 +1,7 @@
-From 9bacfb2a6d753a90d8c2b69285af8e7168c3d70c Mon Sep 17 00:00:00 2001
+From 01a38ece87a07a900aa55cba4ca6c7f872299d40 Mon Sep 17 00:00:00 2001
 From: OpenAI <noreply@openai.com>
 Date: Mon, 17 Aug 2026 04:24:23 +0000
-Subject: [PATCH 08/17] mailbox: add integrated SMTP, IMAP and webmail server
+Subject: [PATCH 08/18] mailbox: add integrated SMTP, IMAP and webmail server
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
@@ -115,7 +115,7 @@ index 0000000000..68e782c76c
 +
 +Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution and direct-to-MX queueing. DKIM signing, SPF/DMARC evaluation, reputation/greylisting, antivirus and spam filtering are therefore expected to be supplied by the configured outbound/inbound edge when those controls are required for an Internet-exposed production deployment.
 diff --git a/go.mod b/go.mod
-index abbe9d9673..dcea46fce9 100644
+index 62fde25e4b..77e55f6445 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,6 +39,7 @@ require (
@@ -127,7 +127,7 @@ index abbe9d9673..dcea46fce9 100644
  	github.com/felixge/fgprof v0.9.5
  	github.com/fsnotify/fsnotify v1.10.1
 diff --git a/go.sum b/go.sum
-index d6480480b8..b62f54d081 100644
+index e70841944b..28fee89486 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -225,6 +225,7 @@ github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o
@@ -973,7 +973,7 @@ index 0000000000..d59032e5d1
 +	}
 +}
 diff --git a/modules/setting/mailer.go b/modules/setting/mailer.go
-index 0fa259225a..bd131d6cdc 100644
+index e28c467fcb..b881983f7c 100644
 --- a/modules/setting/mailer.go
 +++ b/modules/setting/mailer.go
 @@ -61,6 +61,7 @@ var MailService *Mailer
