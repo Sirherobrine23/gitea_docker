@@ -1,4 +1,4 @@
-From 0e0d673db1bf44f84fdb969682f1d81c4b7fc5ab Mon Sep 17 00:00:00 2001
+From d8ea168355665822dca78659d27147980852fcd2 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 01:56:58 +0000
 Subject: [PATCH 12/18] fix(mailbox): keep a mail identity from changing hands
@@ -211,7 +211,7 @@ index 8bc4eb62c8..27ce0369f5 100644
 +	assert.True(t, validLocalPart("old-name"))
 +}
 diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
-index 06a011d97c..d56a0b18dc 100644
+index 92556afe98..936c056140 100644
 --- a/options/locale/locale_en-US.json
 +++ b/options/locale/locale_en-US.json
 @@ -545,8 +545,8 @@
@@ -401,10 +401,10 @@ index 832b498738..1ec3a8ddf7 100644
  		m.Post("/{id}/action", mailbox_router.Action)
  		m.Get("/{id}/raw", mailbox_router.Raw)
 diff --git a/services/context/context.go b/services/context/context.go
-index 9f51925806..b9df96d69b 100644
+index 690905e9d3..ce43e246d4 100644
 --- a/services/context/context.go
 +++ b/services/context/context.go
-@@ -191,6 +191,7 @@ func Contexter() func(next http.Handler) http.Handler {
+@@ -194,6 +194,7 @@ func Contexter() func(next http.Handler) http.Handler {
  			ctx.Data["DisableStars"] = setting.Repository.DisableStars
  			ctx.Data["EnableActions"] = setting.Actions.Enabled && !unit.TypeActions.UnitGlobalDisabled()
  			ctx.Data["MailboxEnabled"] = setting.MailboxServer.Enabled && setting.MailboxServer.WebEnabled

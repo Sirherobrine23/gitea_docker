@@ -1,4 +1,4 @@
-From 90a4c1291aa6f5f68a50787a3559303d4c69be92 Mon Sep 17 00:00:00 2001
+From e93c31b6ea3961d1ef7c4525b5722feb791fe7d4 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
 Subject: [PATCH 07/18] fix: migrate issue live updates to websocket pubsub
@@ -262,7 +262,7 @@ index 602c243104..2479421f99 100644
  	entries, err := issueLiveParseSnapshot(`
  <div data-issue-live-snapshot>
 diff --git a/routers/web/repo/issue_view.go b/routers/web/repo/issue_view.go
-index f5b99003aa..6b5ab547a2 100644
+index 2e68923b84..a37918061b 100644
 --- a/routers/web/repo/issue_view.go
 +++ b/routers/web/repo/issue_view.go
 @@ -1078,18 +1078,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co

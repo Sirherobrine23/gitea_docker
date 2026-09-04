@@ -1,4 +1,4 @@
-From 7efc1dae2e0476cb94deeb51ce2384a6e909fee6 Mon Sep 17 00:00:00 2001
+From 9ad6291a5aa78961e6fa6b1d70231186af49da58 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:35:29 +0000
 Subject: [PATCH 16/18] fix(mailbox): synthesize a mailer config when only

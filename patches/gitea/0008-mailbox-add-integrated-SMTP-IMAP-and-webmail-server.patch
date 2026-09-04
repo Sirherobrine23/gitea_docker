@@ -1,4 +1,4 @@
-From 01a38ece87a07a900aa55cba4ca6c7f872299d40 Mon Sep 17 00:00:00 2001
+From 10a75b4cba1cdb601286669f365c78536d744611 Mon Sep 17 00:00:00 2001
 From: OpenAI <noreply@openai.com>
 Date: Mon, 17 Aug 2026 04:24:23 +0000
 Subject: [PATCH 08/18] mailbox: add integrated SMTP, IMAP and webmail server
@@ -115,7 +115,7 @@ index 0000000000..68e782c76c
 +
 +Remote-domain outbound delivery deliberately uses the existing `[mailer]` transport rather than implementing DNS MX resolution and direct-to-MX queueing. DKIM signing, SPF/DMARC evaluation, reputation/greylisting, antivirus and spam filtering are therefore expected to be supplied by the configured outbound/inbound edge when those controls are required for an Internet-exposed production deployment.
 diff --git a/go.mod b/go.mod
-index 62fde25e4b..77e55f6445 100644
+index 14f147da00..38f73520f1 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,6 +39,7 @@ require (
@@ -127,7 +127,7 @@ index 62fde25e4b..77e55f6445 100644
  	github.com/felixge/fgprof v0.9.5
  	github.com/fsnotify/fsnotify v1.10.1
 diff --git a/go.sum b/go.sum
-index e70841944b..28fee89486 100644
+index 449d4219e1..bdd1fb4476 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -225,6 +225,7 @@ github.com/elazarl/goproxy v1.7.2 h1:Y2o6urb7Eule09PjlhQRGNsqRfPmYI3KKQLFpCAV3+o
@@ -1417,10 +1417,10 @@ index 63f187508e..832b498738 100644
  		m.Get("", user.Notifications)
  		m.Get("/subscriptions", user.NotificationSubscriptions)
 diff --git a/services/context/context.go b/services/context/context.go
-index a1688111c1..9f51925806 100644
+index f13d51c55f..690905e9d3 100644
 --- a/services/context/context.go
 +++ b/services/context/context.go
-@@ -190,6 +190,7 @@ func Contexter() func(next http.Handler) http.Handler {
+@@ -193,6 +193,7 @@ func Contexter() func(next http.Handler) http.Handler {
  			ctx.Data["DisableMigrations"] = setting.Repository.DisableMigrations
  			ctx.Data["DisableStars"] = setting.Repository.DisableStars
  			ctx.Data["EnableActions"] = setting.Actions.Enabled && !unit.TypeActions.UnitGlobalDisabled()

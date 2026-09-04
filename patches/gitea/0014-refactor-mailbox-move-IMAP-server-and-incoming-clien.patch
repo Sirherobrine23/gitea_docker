@@ -1,4 +1,4 @@
-From de282c1c99b884fbceb82f25b6ac67cf0834332e Mon Sep 17 00:00:00 2001
+From d21f074fe465fe19170a2c28b5e71c22e11e3a3b Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:15:36 +0000
 Subject: [PATCH 14/18] refactor(mailbox): move IMAP server and incoming client
@@ -78,7 +78,7 @@ index 179d0f0e0a..be656057e0 100644
  
  MX resolution, opportunistic TLS, deferral retries and delivery status notices are native. Not implemented: full RFC 3464 DSN bodies (the notice is a plain-text message), inbound greylisting, reputation scoring, antivirus and content-spam filtering. A production Internet deployment still needs correct DNS, abuse controls and any desired spam/virus filtering at the boundary.
 diff --git a/go.mod b/go.mod
-index 31d30b8672..83d98be182 100644
+index b3b0c0f979..aa725ef2af 100644
 --- a/go.mod
 +++ b/go.mod
 @@ -39,8 +39,8 @@ require (
@@ -93,7 +93,7 @@ index 31d30b8672..83d98be182 100644
  	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6
  	github.com/emersion/go-smtp v0.25.0
 diff --git a/go.sum b/go.sum
-index a517e62e2b..b436dca069 100644
+index d38235742c..cea30661a2 100644
 --- a/go.sum
 +++ b/go.sum
 @@ -225,19 +225,16 @@ github.com/editorconfig/editorconfig-core-go/v2 v2.6.4 h1:CHwUbBVVyKWRX9kt5A/Otw

@@ -1,4 +1,4 @@
-From 88662baec79eb0f30084bd675e1524f9935e55a1 Mon Sep 17 00:00:00 2001
+From fdaa4d1fee9fe9a1ecb2619351fbefb770560ef5 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
