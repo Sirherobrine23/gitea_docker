@@ -1,4 +1,4 @@
-From 623259af74e76c85e9416524b290e3297463bedf Mon Sep 17 00:00:00 2001
+From 65c9ff86cc8bfa95da4fb3a0946c31b22b7dccb7 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 18 Aug 2026 22:02:27 +0000
 Subject: [PATCH 10/18] refactor(mailbox): serve SMTP with go-smtp instead of a

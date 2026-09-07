@@ -1,4 +1,4 @@
-From 5f82f102ccf388d7bde0f51efe53f665558056e8 Mon Sep 17 00:00:00 2001
+From aeb3cd673de2d3baa46da823b553f2f82a1bb064 Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Tue, 18 Aug 2026 21:54:16 +0000
 Subject: [PATCH 09/18] feat(mailbox): add DKIM signing, inbound SPF/DKIM/DMARC
@@ -575,10 +575,10 @@ index d59032e5d1..871296e092 100644
  		MailboxServer.MaxMessageSize = 0
  	}
 diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
-index c3ec1353a0..92556afe98 100644
+index 5cfa99fd88..57f90917b8 100644
 --- a/options/locale/locale_en-US.json
 +++ b/options/locale/locale_en-US.json
-@@ -515,6 +515,38 @@
+@@ -516,6 +516,38 @@
    "mail.team_invite.text_1": "%[1]s has invited you to join team %[2]s in organization %[3]s.",
    "mail.team_invite.text_2": "Please click the following link to join the team:",
    "mail.team_invite.text_3": "Note: This invitation was intended for %[1]s. If you were not expecting this invitation, you can ignore this email.",

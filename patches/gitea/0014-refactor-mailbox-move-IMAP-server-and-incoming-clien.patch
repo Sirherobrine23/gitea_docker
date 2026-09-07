@@ -1,4 +1,4 @@
-From d21f074fe465fe19170a2c28b5e71c22e11e3a3b Mon Sep 17 00:00:00 2001
+From eecbd0efc07431dcc224ca30aef55f37e160258d Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 13:15:36 +0000
 Subject: [PATCH 14/18] refactor(mailbox): move IMAP server and incoming client

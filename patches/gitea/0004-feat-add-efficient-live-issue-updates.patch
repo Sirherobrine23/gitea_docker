@@ -1,4 +1,4 @@
-From 2f893b909ee8d006f204a192c1f9be135dfad47a Mon Sep 17 00:00:00 2001
+From 8797e41ab220a4431e789f87ff7a8af4c1f571c5 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 04/18] feat: add efficient live issue updates
@@ -1090,7 +1090,7 @@ index 7588b53092..63f187508e 100644
  			m.Get("/attachments/{uuid}", repo.GetAttachment)
  			m.Group("/content-history", func() {
 diff --git a/templates/repo/issue/view_content.tmpl b/templates/repo/issue/view_content.tmpl
-index eaee1d8773..d4788329c7 100644
+index c236ef8fcf..3e1b4f611a 100644
 --- a/templates/repo/issue/view_content.tmpl
 +++ b/templates/repo/issue/view_content.tmpl
 @@ -1,69 +1,7 @@
@@ -1904,7 +1904,7 @@ index 0000000000..e985b35cb8
 +  window.addEventListener('pageshow', () => socket.resume());
 +}
 diff --git a/web_src/js/index.ts b/web_src/js/index.ts
-index 31ec9a7e96..ba07ff3185 100644
+index cf0d85e3fd..8d84b99ce1 100644
 --- a/web_src/js/index.ts
 +++ b/web_src/js/index.ts
 @@ -20,6 +20,7 @@ import {initMarkupContent} from './markup/content.ts';
@@ -1915,7 +1915,7 @@ index 31ec9a7e96..ba07ff3185 100644
  import {initRepoEllipsisButton, initCommitStatuses, initAvatarStackPopup, initCommitFileHistoryFollowRename} from './features/repo-commit.ts';
  import {initRepoTopicBar} from './features/repo-home.ts';
  import {initAdminCommon} from './features/admin/common.ts';
-@@ -130,6 +131,7 @@ const initPerformanceTracer = callInitFunctions([
+@@ -131,6 +132,7 @@ const initPerformanceTracer = callInitFunctions([
    initRepoIssueContentHistory,
    initRepoIssueList,
    initRepoIssueFilterItemLabel,

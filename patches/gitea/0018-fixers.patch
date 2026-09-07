@@ -1,4 +1,4 @@
-From 3e740e46dcb228e845a1f54a4afd9d27cf8a08d2 Mon Sep 17 00:00:00 2001
+From 8c655ae5b7dc3a9119a9268a8ccec0cb016235e7 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 1 Sep 2026 11:07:48 -0300
 Subject: [PATCH 18/18] fixers
@@ -66,10 +66,10 @@ index 0000000000..10555bdbfe
 +  });
 +}
 diff --git a/web_src/js/index.ts b/web_src/js/index.ts
-index ba07ff3185..49786bbe12 100644
+index 8d84b99ce1..895d780075 100644
 --- a/web_src/js/index.ts
 +++ b/web_src/js/index.ts
-@@ -68,6 +68,7 @@ import {initGlobalShortcut} from './modules/shortcut.ts';
+@@ -69,6 +69,7 @@ import {initGlobalShortcut} from './modules/shortcut.ts';
  import {initDevtest} from './modules/devtest.ts';
  import {initRepoWatch} from './features/repo-watch.ts';
  import {initPackagesView} from './features/packages.ts';
@@ -77,7 +77,7 @@ index ba07ff3185..49786bbe12 100644
  
  const initStartTime = performance.now();
  const initPerformanceTracer = callInitFunctions([
-@@ -165,6 +166,8 @@ const initPerformanceTracer = callInitFunctions([
+@@ -166,6 +167,8 @@ const initPerformanceTracer = callInitFunctions([
    initRepoFileView,
    initActionsPermissionsForm,
  

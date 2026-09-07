@@ -1,4 +1,4 @@
-From 97bf304d5b2d12daa1f367660c8944a85bd90cb9 Mon Sep 17 00:00:00 2001
+From 5c048982399c489fc15964ee02ae5389b26237d2 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
 Subject: [PATCH 05/18] feat: add websocket for update comments
@@ -9,13 +9,12 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  routers/web/repo/issue_content_history.go     |   5 +
  routers/web/repo/issue_live.go                |  10 +
  routers/web/repo/issue_live_test.go           |   6 +-
- templates/repo/issue/view_content.tmpl        |   6 +-
  .../view_content/issue_live_comment.tmpl      |   8 +
  web_src/js/features/comp/ReactionSelector.ts  |   2 +-
  web_src/js/features/repo-issue-live.ts        | 338 +++++-------------
  web_src/js/modules/issue-live-worker.ts       |  75 ++++
  web_src/js/websocket.sharedworker.ts          | 216 +++++++++++
- 10 files changed, 511 insertions(+), 264 deletions(-)
+ 9 files changed, 508 insertions(+), 261 deletions(-)
  create mode 100644 templates/repo/issue/view_content/issue_live_comment.tmpl
  create mode 100644 web_src/js/modules/issue-live-worker.ts
  create mode 100644 web_src/js/websocket.sharedworker.ts
@@ -332,23 +331,6 @@ index 445cec3a70..602c243104 100644
  }
  
  func TestIssueLiveParseSnapshotRejectsDuplicateKeys(t *testing.T) {
-diff --git a/templates/repo/issue/view_content.tmpl b/templates/repo/issue/view_content.tmpl
-index d4788329c7..a8220e7f75 100644
---- a/templates/repo/issue/view_content.tmpl
-+++ b/templates/repo/issue/view_content.tmpl
-@@ -93,9 +93,9 @@
- 		</div>
- 
- 		{{if .IsAttachmentEnabled}}
--			<div class="field">
--				{{template "repo/upload" .}}
--			</div>
-+		<div class="field">
-+			{{template "repo/upload" .}}
-+		</div>
- 		{{end}}
- 
- 		<div class="field">
 diff --git a/templates/repo/issue/view_content/issue_live_comment.tmpl b/templates/repo/issue/view_content/issue_live_comment.tmpl
 new file mode 100644
 index 0000000000..abcfa14e36

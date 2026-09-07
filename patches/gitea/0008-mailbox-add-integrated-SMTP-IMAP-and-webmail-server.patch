@@ -1,4 +1,4 @@
-From 10a75b4cba1cdb601286669f365c78536d744611 Mon Sep 17 00:00:00 2001
+From 444557c7fb2b3e93f3a49f101cae7d96f6594330 Mon Sep 17 00:00:00 2001
 From: OpenAI <noreply@openai.com>
 Date: Mon, 17 Aug 2026 04:24:23 +0000
 Subject: [PATCH 08/18] mailbox: add integrated SMTP, IMAP and webmail server
@@ -1417,10 +1417,10 @@ index 63f187508e..832b498738 100644
  		m.Get("", user.Notifications)
  		m.Get("/subscriptions", user.NotificationSubscriptions)
 diff --git a/services/context/context.go b/services/context/context.go
-index f13d51c55f..690905e9d3 100644
+index 99e40ea72e..f3af686216 100644
 --- a/services/context/context.go
 +++ b/services/context/context.go
-@@ -193,6 +193,7 @@ func Contexter() func(next http.Handler) http.Handler {
+@@ -196,6 +196,7 @@ func Contexter() func(next http.Handler) http.Handler {
  			ctx.Data["DisableMigrations"] = setting.Repository.DisableMigrations
  			ctx.Data["DisableStars"] = setting.Repository.DisableStars
  			ctx.Data["EnableActions"] = setting.Actions.Enabled && !unit.TypeActions.UnitGlobalDisabled()

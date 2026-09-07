@@ -1,4 +1,4 @@
-From a72e127fa8eda30b283e9d89d617ff649cdd654f Mon Sep 17 00:00:00 2001
+From 7d77a4e183795f7fa966ccf3e83d6d6fd77f337d Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 00:43:39 +0000
 Subject: [PATCH 11/18] feat(mailbox): deliver remote mail directly to MX so

@@ -1,4 +1,4 @@
-From d8ea168355665822dca78659d27147980852fcd2 Mon Sep 17 00:00:00 2001
+From ea36b86b5ddc7f00583f89f90998afff4430dead Mon Sep 17 00:00:00 2001
 From: Claude <noreply@anthropic.com>
 Date: Wed, 19 Aug 2026 01:56:58 +0000
 Subject: [PATCH 12/18] fix(mailbox): keep a mail identity from changing hands
@@ -211,10 +211,10 @@ index 8bc4eb62c8..27ce0369f5 100644
 +	assert.True(t, validLocalPart("old-name"))
 +}
 diff --git a/options/locale/locale_en-US.json b/options/locale/locale_en-US.json
-index 92556afe98..936c056140 100644
+index 57f90917b8..e796bebd5b 100644
 --- a/options/locale/locale_en-US.json
 +++ b/options/locale/locale_en-US.json
-@@ -545,8 +545,8 @@
+@@ -546,8 +546,8 @@
    "mailbox.create_folder": "Create folder",
    "mailbox.no_custom_folders": "No custom folders configured.",
    "mailbox.aliases": "Aliases",
@@ -224,7 +224,7 @@ index 92556afe98..936c056140 100644
    "modal.yes": "Yes",
    "modal.no": "No",
    "modal.confirm": "Confirm",
-@@ -3517,6 +3517,22 @@
+@@ -3518,6 +3518,22 @@
    "admin.self_check.database_fix_mysql": "For MySQL/MariaDB users, you could use the \"gitea doctor convert\" command to fix the collation problems, or you could also fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries.",
    "admin.self_check.database_fix_mssql": "For MSSQL users, you could only fix the problem manually with \"ALTER ... COLLATE ...\" SQL queries at the moment.",
    "admin.self_check.location_origin_mismatch": "Current URL (%[1]s) doesn't match the URL seen by Gitea (%[2]s). If you are using a reverse proxy, please make sure the \"Host\" and \"X-Forwarded-Proto\" headers are set correctly.",
@@ -401,10 +401,10 @@ index 832b498738..1ec3a8ddf7 100644
  		m.Post("/{id}/action", mailbox_router.Action)
  		m.Get("/{id}/raw", mailbox_router.Raw)
 diff --git a/services/context/context.go b/services/context/context.go
-index 690905e9d3..ce43e246d4 100644
+index f3af686216..7d98416963 100644
 --- a/services/context/context.go
 +++ b/services/context/context.go
-@@ -194,6 +194,7 @@ func Contexter() func(next http.Handler) http.Handler {
+@@ -197,6 +197,7 @@ func Contexter() func(next http.Handler) http.Handler {
  			ctx.Data["DisableStars"] = setting.Repository.DisableStars
  			ctx.Data["EnableActions"] = setting.Actions.Enabled && !unit.TypeActions.UnitGlobalDisabled()
  			ctx.Data["MailboxEnabled"] = setting.MailboxServer.Enabled && setting.MailboxServer.WebEnabled
