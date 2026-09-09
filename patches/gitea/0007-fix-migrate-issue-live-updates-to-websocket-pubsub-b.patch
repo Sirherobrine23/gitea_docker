@@ -1,8 +1,7 @@
-From 9a41931cc82c46aeb0f4266b7c4e24f84372d7b1 Mon Sep 17 00:00:00 2001
+From e53db5a6783ab732dc6dcd0522b6f0994fb0a491 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
-Subject: [PATCH 07/18] fix: migrate issue live updates to websocket pubsub
- base
+Subject: [PATCH 7/7] fix: migrate issue live updates to websocket pubsub base
 
 Use the pub/sub broker introduced by the WebSocket notification subsystem for issue timeline invalidations, keep the permission-aware issue WebSocket endpoint explicit, and render the issue description before generating snapshots so the first timeline entry is not replaced by empty content.
 

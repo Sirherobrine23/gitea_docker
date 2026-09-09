@@ -1,7 +1,7 @@
-From 8797e41ab220a4431e789f87ff7a8af4c1f571c5 Mon Sep 17 00:00:00 2001
+From 15efe3534689783931eae6b09fc92e891b39171b Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Thu, 16 Jul 2026 07:33:39 -0300
-Subject: [PATCH 04/18] feat: add efficient live issue updates
+Subject: [PATCH 4/7] feat: add efficient live issue updates
 
 Avoid re-rendering the complete timeline every two seconds and do not morph
 all comments when a page first opens. Use mutation invalidations for common
@@ -1090,7 +1090,7 @@ index 7588b53092..63f187508e 100644
  			m.Get("/attachments/{uuid}", repo.GetAttachment)
  			m.Group("/content-history", func() {
 diff --git a/templates/repo/issue/view_content.tmpl b/templates/repo/issue/view_content.tmpl
-index c236ef8fcf..3e1b4f611a 100644
+index dbf2712e10..d83f24d5d2 100644
 --- a/templates/repo/issue/view_content.tmpl
 +++ b/templates/repo/issue/view_content.tmpl
 @@ -1,69 +1,7 @@

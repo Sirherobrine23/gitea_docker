@@ -1,4 +1,4 @@
-From 02983ce1eb3ae0a0b2c9f64a8b8c6c471065f554 Mon Sep 17 00:00:00 2001
+From 2999d25d929f9579010839949f523ba8b382d8b6 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -12,10 +12,10 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  4 files changed, 86 insertions(+), 25 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
-index 72f86751..6420d2bb 100644
+index 0ff68a34..922541f4 100644
 --- a/internal/app/cmd/cache-server.go
 +++ b/internal/app/cmd/cache-server.go
-@@ -18,9 +18,10 @@ import (
+@@ -16,9 +16,10 @@ import (
  )
  
  type cacheServerArgs struct {
@@ -29,7 +29,7 @@ index 72f86751..6420d2bb 100644
  }
  
  func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
-@@ -33,9 +34,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+@@ -31,9 +32,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
  		initLogging(cfg)
  
  		var (
@@ -43,7 +43,7 @@ index 72f86751..6420d2bb 100644
  		)
  
  		// cacheArgs has higher priority
-@@ -45,11 +47,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+@@ -43,11 +45,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
  		if cacheArgs.Host != "" {
  			host = cacheArgs.Host
  		}
@@ -62,7 +62,7 @@ index 72f86751..6420d2bb 100644
  			return errors.New("cache.external_secret (or cache.external_secret_file) must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index 4cb02420..a65a92c3 100644
+index e6fadd9b..c5c62c00 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
 @@ -37,6 +37,8 @@ func Execute(ctx context.Context) {
