@@ -1,4 +1,4 @@
-From e53db5a6783ab732dc6dcd0522b6f0994fb0a491 Mon Sep 17 00:00:00 2001
+From 16fa37478cb9ae28c0be7802fcbdbe108b4a95be Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Mon, 27 Jul 2026 14:49:24 +0000
 Subject: [PATCH 7/7] fix: migrate issue live updates to websocket pubsub base
@@ -19,7 +19,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  rename web_src/js/{websocket.sharedworker.ts => issue-live.sharedworker.ts} (100%)
 
 diff --git a/routers/web/repo/issue_content_history.go b/routers/web/repo/issue_content_history.go
-index e32e7d90f3..08c27fdee3 100644
+index e32e7d9..08c27fd 100644
 --- a/routers/web/repo/issue_content_history.go
 +++ b/routers/web/repo/issue_content_history.go
 @@ -22,11 +22,6 @@ import (
@@ -35,7 +35,7 @@ index e32e7d90f3..08c27fdee3 100644
  	if ctx.Written() {
  		return
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
-index 65c9538929..b702a483d9 100644
+index 65c9538..b702a48 100644
 --- a/routers/web/repo/issue_live.go
 +++ b/routers/web/repo/issue_live.go
 @@ -10,7 +10,6 @@ import (
@@ -122,7 +122,7 @@ index 65c9538929..b702a483d9 100644
  					goto refreshTimeline
  				}
 diff --git a/routers/web/repo/issue_live_hub.go b/routers/web/repo/issue_live_hub.go
-index ea1b46756e..268efc503c 100644
+index ea1b467..268efc5 100644
 --- a/routers/web/repo/issue_live_hub.go
 +++ b/routers/web/repo/issue_live_hub.go
 @@ -4,58 +4,22 @@
@@ -192,7 +192,7 @@ index ea1b46756e..268efc503c 100644
  
  func notifyIssueLiveIssue(issue *issues_model.Issue) {
 diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
-index 602c243104..2479421f99 100644
+index 602c243..2479421 100644
 --- a/routers/web/repo/issue_live_test.go
 +++ b/routers/web/repo/issue_live_test.go
 @@ -5,6 +5,9 @@ package repo
@@ -261,7 +261,7 @@ index 602c243104..2479421f99 100644
  	entries, err := issueLiveParseSnapshot(`
  <div data-issue-live-snapshot>
 diff --git a/routers/web/repo/issue_view.go b/routers/web/repo/issue_view.go
-index 2e68923b84..a37918061b 100644
+index 7e948e8..c0009a4 100644
 --- a/routers/web/repo/issue_view.go
 +++ b/routers/web/repo/issue_view.go
 @@ -1078,18 +1078,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
@@ -299,7 +299,7 @@ index 2e68923b84..a37918061b 100644
  	}
  }
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
-index fa8e5a3a16..3ae436a8a1 100644
+index fa8e5a3..3ae436a 100644
 --- a/web_src/js/features/repo-issue-live.ts
 +++ b/web_src/js/features/repo-issue-live.ts
 @@ -35,7 +35,7 @@ type MorphOptionsWithCallbacks = {
@@ -316,7 +316,7 @@ similarity index 100%
 rename from web_src/js/websocket.sharedworker.ts
 rename to web_src/js/issue-live.sharedworker.ts
 diff --git a/web_src/js/modules/issue-live-worker.ts b/web_src/js/modules/issue-live-worker.ts
-index d9dca36975..2d9892142f 100644
+index d9dca36..2d98921 100644
 --- a/web_src/js/modules/issue-live-worker.ts
 +++ b/web_src/js/modules/issue-live-worker.ts
 @@ -35,7 +35,7 @@ export class IssueLiveSharedWorker {
@@ -329,5 +329,5 @@ index d9dca36975..2d9892142f 100644
      );
  
 -- 
-2.55.0
+2.43.0
 
