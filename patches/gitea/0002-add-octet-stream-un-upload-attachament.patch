@@ -1,7 +1,7 @@
-From 386675b627d57c1f0c054da45336810ec6c803d9 Mon Sep 17 00:00:00 2001
+From fea535e9234a56b924d9837251b77c7102eb343f Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:58 -0300
-Subject: [PATCH 2/7] add octet stream un upload attachament
+Subject: [PATCH 2/9] add octet stream un upload attachament
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
@@ -9,7 +9,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  1 file changed, 7 insertions(+), 2 deletions(-)
 
 diff --git a/routers/api/v1/repo/release_attachment.go b/routers/api/v1/repo/release_attachment.go
-index 4a1a1f4..2678c20 100644
+index 4a1a1f48cd..2678c206ab 100644
 --- a/routers/api/v1/repo/release_attachment.go
 +++ b/routers/api/v1/repo/release_attachment.go
 @@ -218,7 +218,9 @@ func CreateReleaseAttachment(ctx *context.APIContext) {
@@ -36,5 +36,5 @@ index 4a1a1f4..2678c20 100644
  		uploaderFile = attachment_service.NewLimitedUploaderMaxBytesReader(ctx.Req.Body, ctx.Resp)
  	}
 -- 
-2.43.0
+2.55.0
 

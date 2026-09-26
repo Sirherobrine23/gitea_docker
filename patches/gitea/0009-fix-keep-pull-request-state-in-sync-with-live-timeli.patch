@@ -1,0 +1,187 @@
+From 7d2136e541752a89de564f92f28e627a7f67872f Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 18:39:20 +0000
+Subject: [PATCH 9/9] fix: keep pull request state in sync with live timeline
+ updates
+
+Render the live snapshot with the same data as the regular view (resolve
+conversation permission and editorconfig), restore the "edited" menus which
+the frontend adds to re-rendered comments, and reload the merge box when the
+timeline changes so a merged pull request doesn't keep offering to merge.
+
+Assisted-by: Claude Code:claude-opus-5-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/web/repo/issue_live.go                |  5 +++
+ routers/web/web.go                            |  2 +-
+ .../issue/view_content/pull_merge_box.tmpl    |  2 +-
+ web_src/js/features/repo-issue-content.ts     |  6 ++--
+ web_src/js/features/repo-issue-live.ts        |  8 +++++
+ web_src/js/features/repo-issue-pull.ts        | 35 +++++++++++--------
+ 6 files changed, 39 insertions(+), 19 deletions(-)
+
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index b702a483d9..4b7833b757 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -150,6 +150,11 @@ func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
+ 	}
+ 	if issue.IsPull {
+ 		ctx.Data["BaseTarget"] = issue.PullRequest.BaseBranch
++		canMarkConversation, err := issues_model.CanMarkConversation(ctx, issue, ctx.Doer)
++		if err != nil {
++			return "", err
++		}
++		ctx.Data["CanMarkConversation"] = canMarkConversation
+ 	}
+ 
+ 	prepareIssueViewCommentsAndSidebarParticipants(ctx, issue)
+diff --git a/routers/web/web.go b/routers/web/web.go
+index 130a311a43..3db138f026 100644
+--- a/routers/web/web.go
++++ b/routers/web/web.go
+@@ -1321,7 +1321,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+ 		m.Get("/posters", repo.IssuePullPosters)
+ 		m.Group("/{index}", func() {
+ 			m.Get("/info", repo.GetIssueInfo)
+-			m.Get("/live", repo.IssueLive)
++			m.Get("/live", repo.SetEditorconfigIfExists, repo.IssueLive)
+ 			m.Get("/attachments", repo.GetIssueAttachments)
+ 			m.Get("/attachments/{uuid}", repo.GetAttachment)
+ 			m.Group("/content-history", func() {
+diff --git a/templates/repo/issue/view_content/pull_merge_box.tmpl b/templates/repo/issue/view_content/pull_merge_box.tmpl
+index ab3d4b9ac5..f99d672dfc 100644
+--- a/templates/repo/issue/view_content/pull_merge_box.tmpl
++++ b/templates/repo/issue/view_content/pull_merge_box.tmpl
+@@ -2,9 +2,9 @@
+ {{if $data.ShowMergeBox}}
+ <div class="timeline-item comment pull-merge-box"
+ 	data-global-init="initRepoPullMergeBox"
++	data-pull-link="{{$.Issue.Link}}"
+ 	{{if $data.ReloadingInterval}}
+ 		data-pull-merge-box-reloading-interval="{{$data.ReloadingInterval}}"
+-		data-pull-link="{{$.Issue.Link}}"
+ 	{{end}}
+ >
+ 	<div class="timeline-avatar {{$data.TimelineIconClass}}">{{svg "octicon-git-merge" 40}}</div>
+diff --git a/web_src/js/features/repo-issue-content.ts b/web_src/js/features/repo-issue-content.ts
+index 5194f8802f..0da9f0d048 100644
+--- a/web_src/js/features/repo-issue-content.ts
++++ b/web_src/js/features/repo-issue-content.ts
+@@ -125,6 +125,7 @@ function showContentHistoryMenu(issueBaseUrl: string, elCommentItem: Element, co
+   });
+ }
+ 
++// it only adds the missing menus, so it can be called again for re-rendered comments (e.g. live updates)
+ export async function initRepoIssueContentHistory() {
+   const issuePageInfo = parseIssuePageInfo();
+   if (!issuePageInfo.issueNumber) return;
+@@ -134,6 +135,7 @@ export async function initRepoIssueContentHistory() {
+   if (!elIssueDescription && !elComments.length) return;
+ 
+   const issueBaseUrl = `${issuePageInfo.repoLink}/issues/${issuePageInfo.issueNumber}`;
++  const hasMenu = (el: Element) => Boolean(el.querySelector('.comment-header-left .content-history-menu'));
+ 
+   try {
+     const response = await GET(`${issueBaseUrl}/content-history/overview`);
+@@ -144,13 +146,13 @@ export async function initRepoIssueContentHistory() {
+     i18nTextDeleteFromHistoryConfirm = resp.i18n.textDeleteFromHistoryConfirm;
+     i18nTextOptions = resp.i18n.textOptions;
+ 
+-    if (resp.editedHistoryCountMap[0] && elIssueDescription) {
++    if (resp.editedHistoryCountMap[0] && elIssueDescription && !hasMenu(elIssueDescription)) {
+       showContentHistoryMenu(issueBaseUrl, elIssueDescription, '0');
+     }
+     for (const commentId of Object.keys(resp.editedHistoryCountMap)) {
+       if (commentId === '0') continue;
+       const elIssueComment = document.querySelector(`#issuecomment-${commentId}`);
+-      if (elIssueComment) showContentHistoryMenu(issueBaseUrl, elIssueComment, commentId);
++      if (elIssueComment && !hasMenu(elIssueComment)) showContentHistoryMenu(issueBaseUrl, elIssueComment, commentId);
+     }
+   } catch (error) {
+     console.error('Error:', error);
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index 0260746c10..3645bb04b9 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -10,6 +10,8 @@ import {
+ } from '../modules/issue-live-worker.ts';
+ import {getComboMarkdownEditor} from './comp/ComboMarkdownEditor.ts';
+ import {triggerUploadStateChanged} from './comp/EditorUpload.ts';
++import {initRepoIssueContentHistory} from './repo-issue-content.ts';
++import {pullMergeBoxReloadEvent} from './repo-issue-pull.ts';
+ import {issueLiveRefreshEvent} from './comp/ReactionSelector.ts';
+ 
+ const timelineItemIdPattern = /^(?:issue|pull)(?:comment)?-\d+$/;
+@@ -315,6 +317,12 @@ function applyTimelineOperations(operations: IssueLiveOperation[]) {
+     const offset = scrollAnchor.element.getBoundingClientRect().top - scrollAnchor.top;
+     if (offset) window.scrollBy(0, offset);
+   }
++  // the "edited" menus are added by the frontend, so re-rendered comments lose them
++  if (positionOperations.length) {
++    initRepoIssueContentHistory();
++    // the merge state (merged, new commits, reviews) is shown outside of the timeline
++    document.querySelector('.pull-merge-box')?.dispatchEvent(new CustomEvent(pullMergeBoxReloadEvent));
++  }
+   updateSharedWorkerResumeState();
+ }
+ 
+diff --git a/web_src/js/features/repo-issue-pull.ts b/web_src/js/features/repo-issue-pull.ts
+index ac30342909..1ca570ab1b 100644
+--- a/web_src/js/features/repo-issue-pull.ts
++++ b/web_src/js/features/repo-issue-pull.ts
+@@ -36,6 +36,8 @@ async function initRepoPullRequestMergeForm(box: HTMLElement) {
+   view.mount(el); // TODO: can unmount when reloaded?
+ }
+ 
++export const pullMergeBoxReloadEvent = 'gitea-pull-merge-box-reload';
++
+ function initRepoPullMergeBoxRefresh(el: Element) {
+   // The merge box has complex buttons & form, if the user has interacted with any element, don't refresh.
+   // Otherwise, the user won't be able to merge or schedule a merge (auto-merge) when the PR status is not ready.
+@@ -45,24 +47,27 @@ function initRepoPullMergeBoxRefresh(el: Element) {
+     el.addEventListener(event, () => { interacted = true }, {capture: true});
+   }
+ 
++  const reload = async () => {
++    if (interacted || !el.isConnected) return;
++    const pullLink = el.getAttribute('data-pull-link')!;
++    const resp = await GET(`${pullLink}/merge_box`);
++    if (!resp.ok) return;
++    const respText = (await resp.text()).trim();
++    if (!respText) {
++      el.remove(); // merge box might not exist if the PR has changed (e.g.: merged and the head branch has been deleted)
++      return;
++    }
++    const newEl = createElementFromHTML(respText);
++    const scrollTop = el.querySelector<HTMLElement>('.commit-status-list')?.scrollTop;
++    el.replaceWith(newEl); // don't morph, do full replacement to make sure data-global-init and Vue components are re-initialized
++    if (scrollTop) newEl.querySelector<HTMLElement>('.commit-status-list')?.scrollTo({top: scrollTop, behavior: 'instant'});
++  };
++  el.addEventListener(pullMergeBoxReloadEvent, reload);
++
+   activePageTimerRefresh({
+     once: true, // on successful refresh, the data-global-init will re-initialize the element
+     interval: () => interacted ? 0 : Number(el.getAttribute('data-pull-merge-box-reloading-interval')),
+-    async callback() {
+-      if (interacted) return;
+-      const pullLink = el.getAttribute('data-pull-link')!;
+-      const resp = await GET(`${pullLink}/merge_box`);
+-      if (!resp.ok) return;
+-      const respText = (await resp.text()).trim();
+-      if (!respText) {
+-        el.remove(); // merge box might not exist if the PR has changed (e.g.: merged and the head branch has been deleted)
+-        return;
+-      }
+-      const newEl = createElementFromHTML(respText);
+-      const scrollTop = el.querySelector<HTMLElement>('.commit-status-list')?.scrollTop;
+-      el.replaceWith(newEl); // don't morph, do full replacement to make sure data-global-init and Vue components are re-initialized
+-      if (scrollTop) newEl.querySelector<HTMLElement>('.commit-status-list')?.scrollTo({top: scrollTop, behavior: 'instant'});
+-    },
++    callback: reload,
+   });
+ }
+ 
+-- 
+2.55.0
+

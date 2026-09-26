@@ -1,0 +1,471 @@
+From 9ab3f82b90884e3011dfdea1b3df60c2944e370c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Thu, 24 Sep 2026 18:26:29 +0000
+Subject: [PATCH 8/9] fix: stabilize issue live comment updates
+
+Clear the comment form's dropzone after a live submit so already submitted
+attachments are not re-sent and moved to the next comment, and restore the
+buttons' state for the emptied editor.
+
+Replace changed timeline parts instead of morphing them, so rendered markup
+(mermaid, code copy, task lists) is initialized again, and keep the connection
+indicator out of the timeline entries, which caused entries to be re-inserted
+and their markup to be initialized twice.
+
+Publish timeline invalidations from the notifier, so changes made outside of
+the web handlers (API, merges, reviews, pushes) reach live pages, and add the
+missing whois module requirement.
+
+Assisted-by: Claude Code:claude-opus-5-5
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ go.mod                                        |   1 +
+ go.sum                                        |   2 +
+ routers/web/repo/issue_live_hub.go            |  10 +-
+ services/pubsub/broker.go                     |   5 +
+ services/websocket/issue_notifier.go          | 122 ++++++++++++++++++
+ services/websocket/issue_notifier_test.go     |  27 ++++
+ .../js/features/comp/ComboMarkdownEditor.ts   |   8 ++
+ web_src/js/features/repo-issue-live.ts        | 110 ++++++++--------
+ 8 files changed, 220 insertions(+), 65 deletions(-)
+ create mode 100644 services/websocket/issue_notifier.go
+ create mode 100644 services/websocket/issue_notifier_test.go
+
+diff --git a/go.mod b/go.mod
+index 44e96db12d..64fde5be75 100644
+--- a/go.mod
++++ b/go.mod
+@@ -108,6 +108,7 @@ require (
+ 	gopkg.in/ini.v1 v1.67.3
+ 	modernc.org/sqlite v1.59.0
+ 	mvdan.cc/xurls/v2 v2.6.0
++	sirherobrine23.com.br/Sirherobrine23/whois v0.1.0
+ 	xorm.io/builder v0.3.13
+ 	xorm.io/xorm v1.4.1
+ )
+diff --git a/go.sum b/go.sum
+index ca80207b1b..4762bbb991 100644
+--- a/go.sum
++++ b/go.sum
+@@ -860,6 +860,8 @@ mvdan.cc/xurls/v2 v2.6.0 h1:3NTZpeTxYVWNSokW3MKeyVkz/j7uYXYiMtXRUfmjbgI=
+ mvdan.cc/xurls/v2 v2.6.0/go.mod h1:bCvEZ1XvdA6wDnxY7jPPjEmigDtvtvPXAD/Exa9IMSk=
+ pgregory.net/rapid v0.4.2 h1:lsi9jhvZTYvzVpeG93WWgimPRmiJQfGFRNTEZh1dtY0=
+ pgregory.net/rapid v0.4.2/go.mod h1:UYpPVyjFHzYBGHIxLFoupi8vwk6rXNzRY9OMvVxFIOU=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0 h1:3xrfmFaewGIwdcUx3uIrvm58zNKR0/mqYp6crYyMw2Y=
++sirherobrine23.com.br/Sirherobrine23/whois v0.1.0/go.mod h1:5mHKLa1kL2BX5pO/jLtdbtYNJICcvFe7Trc8E5mG+JY=
+ xorm.io/builder v0.3.13 h1:a3jmiVVL19psGeXx8GIurTp7p0IIgqeDmwhcR6BAOAo=
+ xorm.io/builder v0.3.13/go.mod h1:aUW0S9eb9VCaPohFCH3j7czOx1PMW3i1HrSzbLYGBSE=
+ xorm.io/xorm v1.4.1 h1:m7QlNd0eBGb31IV4Q/ow0Du83rtdC1CiwlvJZGvYde8=
+diff --git a/routers/web/repo/issue_live_hub.go b/routers/web/repo/issue_live_hub.go
+index 268efc503c..8514eaebd4 100644
+--- a/routers/web/repo/issue_live_hub.go
++++ b/routers/web/repo/issue_live_hub.go
+@@ -4,22 +4,16 @@
+ package repo
+ 
+ import (
+-	"fmt"
+-
+ 	issues_model "gitea.dev/models/issues"
+ 	"gitea.dev/services/pubsub"
+ )
+ 
+-func issueLiveTopic(repoID, index int64) string {
+-	return fmt.Sprintf("issue-live-%d-%d", repoID, index)
+-}
+-
+ func registerIssueLiveRefresh(repoID, index int64) (<-chan []byte, func()) {
+-	return pubsub.DefaultBroker.Subscribe(issueLiveTopic(repoID, index))
++	return pubsub.DefaultBroker.Subscribe(pubsub.IssueTopic(repoID, index))
+ }
+ 
+ func notifyIssueLive(repoID, index int64) {
+-	pubsub.DefaultBroker.Publish(issueLiveTopic(repoID, index), []byte{1})
++	pubsub.DefaultBroker.Publish(pubsub.IssueTopic(repoID, index), []byte{1})
+ }
+ 
+ func notifyIssueLiveIssue(issue *issues_model.Issue) {
+diff --git a/services/pubsub/broker.go b/services/pubsub/broker.go
+index c7a52a5ff1..84165510d1 100644
+--- a/services/pubsub/broker.go
++++ b/services/pubsub/broker.go
+@@ -37,3 +37,8 @@ var DefaultBroker Broker = NewMemoryBroker()
+ func UserTopic(userID int64) string {
+ 	return fmt.Sprintf("user-%d", userID)
+ }
++
++// IssueTopic carries timeline invalidations of one issue or pull request.
++func IssueTopic(repoID, index int64) string {
++	return fmt.Sprintf("issue-live-%d-%d", repoID, index)
++}
+diff --git a/services/websocket/issue_notifier.go b/services/websocket/issue_notifier.go
+new file mode 100644
+index 0000000000..28bce69dd4
+--- /dev/null
++++ b/services/websocket/issue_notifier.go
+@@ -0,0 +1,122 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package websocket
++
++import (
++	"context"
++
++	issues_model "gitea.dev/models/issues"
++	repo_model "gitea.dev/models/repo"
++	user_model "gitea.dev/models/user"
++	"gitea.dev/modules/log"
++	"gitea.dev/services/pubsub"
++)
++
++// PublishIssueChanged invalidates the live timeline of an issue. Subscribers render
++// the timeline with their own permissions, so the message carries no data.
++func PublishIssueChanged(issue *issues_model.Issue) {
++	if issue != nil {
++		pubsub.DefaultBroker.Publish(pubsub.IssueTopic(issue.RepoID, issue.Index), []byte{1})
++	}
++}
++
++func publishCommentIssueChanged(ctx context.Context, c *issues_model.Comment) {
++	if err := c.LoadIssue(ctx); err != nil {
++		log.Error("websocket: LoadIssue of comment %d: %v", c.ID, err)
++		return
++	}
++	PublishIssueChanged(c.Issue)
++}
++
++func publishPullRequestChanged(ctx context.Context, pr *issues_model.PullRequest) {
++	if err := pr.LoadIssue(ctx); err != nil {
++		log.Error("websocket: LoadIssue of pull request %d: %v", pr.ID, err)
++		return
++	}
++	PublishIssueChanged(pr.Issue)
++}
++
++func (n *wsNotifier) CreateIssueComment(_ context.Context, _ *user_model.User, _ *repo_model.Repository, issue *issues_model.Issue, _ *issues_model.Comment, _ []*user_model.User) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) UpdateComment(ctx context.Context, _ *user_model.User, c *issues_model.Comment, _ string) {
++	publishCommentIssueChanged(ctx, c)
++}
++
++func (n *wsNotifier) DeleteComment(ctx context.Context, _ *user_model.User, c *issues_model.Comment) {
++	publishCommentIssueChanged(ctx, c)
++}
++
++func (n *wsNotifier) IssueChangeStatus(_ context.Context, _ *user_model.User, _ string, issue *issues_model.Issue, _ *issues_model.Comment, _ bool) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeMilestone(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ int64) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeAssignee(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ *user_model.User, _ bool, _ *issues_model.Comment) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) PullRequestReviewRequest(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ *user_model.User, _ bool, _ *issues_model.Comment) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeContent(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ string) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueClearLabels(_ context.Context, _ *user_model.User, issue *issues_model.Issue) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeTitle(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ string) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeRef(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _ string) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) IssueChangeLabels(_ context.Context, _ *user_model.User, issue *issues_model.Issue, _, _ []*issues_model.Label) {
++	PublishIssueChanged(issue)
++}
++
++func (n *wsNotifier) MergePullRequest(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) AutoMergePullRequest(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullRequestSynchronized(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest, _, _ string) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullRequestReview(ctx context.Context, pr *issues_model.PullRequest, _ *issues_model.Review, _ *issues_model.Comment, _ []*user_model.User) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullRequestCodeComment(ctx context.Context, pr *issues_model.PullRequest, _ *issues_model.Comment, _ []*user_model.User) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullRequestChangeTargetBranch(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest, _ string) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullRequestPushCommits(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest, _ *issues_model.Comment) {
++	publishPullRequestChanged(ctx, pr)
++}
++
++func (n *wsNotifier) PullReviewDismiss(ctx context.Context, _ *user_model.User, review *issues_model.Review, _ *issues_model.Comment) {
++	if err := review.LoadIssue(ctx); err != nil {
++		log.Error("websocket: LoadIssue of review %d: %v", review.ID, err)
++		return
++	}
++	PublishIssueChanged(review.Issue)
++}
+diff --git a/services/websocket/issue_notifier_test.go b/services/websocket/issue_notifier_test.go
+new file mode 100644
+index 0000000000..a6516d8762
+--- /dev/null
++++ b/services/websocket/issue_notifier_test.go
+@@ -0,0 +1,27 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
++package websocket
++
++import (
++	"testing"
++
++	issues_model "gitea.dev/models/issues"
++	"gitea.dev/services/pubsub"
++
++	"github.com/stretchr/testify/assert"
++)
++
++func TestIssueNotifierPublishesTimelineInvalidation(t *testing.T) {
++	previousBroker := pubsub.DefaultBroker
++	pubsub.DefaultBroker = pubsub.NewMemoryBroker()
++	t.Cleanup(func() { pubsub.DefaultBroker = previousBroker })
++
++	refresh, cancel := pubsub.DefaultBroker.Subscribe(pubsub.IssueTopic(10, 20))
++	t.Cleanup(cancel)
++
++	// comments created outside of the web UI (e.g. API) must reach the live timeline too
++	(&wsNotifier{}).CreateIssueComment(t.Context(), nil, nil, &issues_model.Issue{RepoID: 10, Index: 20}, nil, nil)
++	(&wsNotifier{}).IssueChangeTitle(t.Context(), nil, &issues_model.Issue{RepoID: 10, Index: 21}, "")
++	assert.Len(t, refresh, 1)
++}
+diff --git a/web_src/js/features/comp/ComboMarkdownEditor.ts b/web_src/js/features/comp/ComboMarkdownEditor.ts
+index 2e034226fa..8549127e32 100644
+--- a/web_src/js/features/comp/ComboMarkdownEditor.ts
++++ b/web_src/js/features/comp/ComboMarkdownEditor.ts
+@@ -212,6 +212,14 @@ export class ComboMarkdownEditor {
+     this.attachedDropzoneInst.emit(DropzoneCustomEventReloadFiles);
+   }
+ 
++  // for forms which stay on the page after submitting new content (no attachment list url to reload from)
++  dropzoneSubmitClear() {
++    if (!this.attachedDropzoneInst) return;
++    this.attachedDropzoneInst.emit('submit'); // mark files as submitted so that removing them doesn't delete them on server
++    this.attachedDropzoneInst.removeAllFiles(true);
++    this.dropzone!.querySelector('.files')!.replaceChildren();
++  }
++
+   isUploading() {
+     if (!this.attachedDropzoneInst) return false;
+     return Boolean(this.attachedDropzoneInst.getQueuedFiles().length || this.attachedDropzoneInst.getUploadingFiles().length);
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index 3ae436a8a1..0260746c10 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -1,4 +1,3 @@
+-import {Idiomorph} from 'idiomorph';
+ import {errorMessage} from '../modules/errors.ts';
+ import {request} from '../modules/fetch.ts';
+ import {showErrorToast} from '../modules/toast.ts';
+@@ -10,6 +9,7 @@ import {
+   type IssueLiveWorkerEvent,
+ } from '../modules/issue-live-worker.ts';
+ import {getComboMarkdownEditor} from './comp/ComboMarkdownEditor.ts';
++import {triggerUploadStateChanged} from './comp/EditorUpload.ts';
+ import {issueLiveRefreshEvent} from './comp/ReactionSelector.ts';
+ 
+ const timelineItemIdPattern = /^(?:issue|pull)(?:comment)?-\d+$/;
+@@ -26,13 +26,6 @@ type TimelineEntry = {
+   element: HTMLElement,
+ };
+ 
+-type MorphOptionsWithCallbacks = {
+-  morphStyle: 'innerHTML' | 'outerHTML',
+-  callbacks: {
+-    beforeNodeMorphed: (oldNode: Node, newNode: Node) => boolean,
+-  },
+-};
+-
+ function issueLiveUrl() {
+   const path = window.location.pathname.replace(/\/+$/, '');
+   const url = new URL(`${path}/live`, window.location.origin);
+@@ -46,10 +39,10 @@ function ensureConnectionIndicator() {
+ 
+   indicator = document.createElement('span');
+   indicator.id = 'issue-live-connection-status';
+-  indicator.className = 'tw-float-right tw-p-1 tw-text-xs tw-text-text-light';
++  indicator.className = 'tw-block tw-text-right tw-p-1 tw-text-xs';
+   indicator.setAttribute('role', 'status');
+   indicator.setAttribute('aria-live', 'polite');
+-  document.querySelector('#timeline-comments-end')?.before(indicator);
++  document.querySelector('#timeline-comments-end')?.closest('.comment-list')?.after(indicator); // keep it out of the timeline entries
+   return indicator;
+ }
+ 
+@@ -190,54 +183,52 @@ function queuePendingOperation(operation: IssueLiveOperation) {
+   pendingOperations.set(operation.key, operation);
+ }
+ 
+-function morphElement(existing: HTMLElement, incoming: HTMLElement) {
+-  if (existing.outerHTML === incoming.outerHTML) return;
+-  const options: MorphOptionsWithCallbacks = {
+-    morphStyle: 'outerHTML',
+-    callbacks: {
+-      // Fomantic stores module state and handlers on these nodes. Preserve
+-      // their identity; global observers initialize newly inserted controls.
+-      beforeNodeMorphed: (oldNode: Node) => !(oldNode instanceof HTMLElement && oldNode.matches('.comment-header-right, .ui.dropdown')),
+-    },
+-  };
+-  Idiomorph.morph(existing, incoming, options);
++// Rendered markup is decorated by the frontend (mermaid, math, code copy, task lists), so a changed
++// part is replaced instead of morphed: the global observers only initialize newly inserted elements.
++const commentEntryParts = [
++  '.comment-header-left',
++  ':scope > .content.comment-container > .comment-body',
++  ':scope > .content.comment-container > .bottom-reactions',
++] as const;
++const appliedServerParts = new WeakMap<HTMLElement, (string | null)[]>();
++
++function commentPartsHtml(element: HTMLElement) {
++  return commentEntryParts.map((selector) => element.querySelector(selector)?.outerHTML ?? null);
+ }
+ 
+-function syncBottomReactions(existing: HTMLElement, incoming: HTMLElement) {
+-  const existingContainer = existing.querySelector<HTMLElement>(':scope > .content.comment-container');
+-  const incomingContainer = incoming.querySelector<HTMLElement>(':scope > .content.comment-container');
+-  if (!existingContainer || !incomingContainer) return;
+-
+-  const existingReactions = existingContainer.querySelector<HTMLElement>(':scope > .bottom-reactions');
+-  const incomingReactions = incomingContainer.querySelector<HTMLElement>(':scope > .bottom-reactions');
+-
+-  if (existingReactions && incomingReactions) {
+-    existingReactions.replaceWith(incomingReactions);
+-  } else if (existingReactions) {
+-    existingReactions.remove();
+-  } else if (incomingReactions) {
+-    existingContainer.append(incomingReactions);
++function updateCommentEntry(existing: HTMLElement, incoming: HTMLElement) {
++  const container = existing.querySelector<HTMLElement>(':scope > .content.comment-container');
++  if (!container) return false;
++  const applied = appliedServerParts.get(existing);
++  const incomingParts = commentPartsHtml(incoming);
++  for (const [index, selector] of commentEntryParts.entries()) {
++    if (applied?.[index] === incomingParts[index]) continue;
++    const existingPart = existing.querySelector<HTMLElement>(selector);
++    const incomingPart = incoming.querySelector<HTMLElement>(selector);
++    if (existingPart && incomingPart) {
++      existingPart.replaceWith(incomingPart);
++    } else if (existingPart) {
++      existingPart.remove();
++    } else if (incomingPart) {
++      container.append(incomingPart);
++    }
+   }
++  appliedServerParts.set(existing, incomingParts);
++  return true;
+ }
+ 
+-function morphCommentEntry(existing: HTMLElement, incoming: HTMLElement) {
+-  const existingHeaderLeft = existing.querySelector<HTMLElement>('.comment-header-left');
+-  const incomingHeaderLeft = incoming.querySelector<HTMLElement>('.comment-header-left');
+-  if (existingHeaderLeft && incomingHeaderLeft) morphElement(existingHeaderLeft, incomingHeaderLeft);
+-
+-  const existingBody = existing.querySelector<HTMLElement>('.comment-body');
+-  const incomingBody = incoming.querySelector<HTMLElement>('.comment-body');
+-  if (existingBody && incomingBody) morphElement(existingBody, incomingBody);
+-
+-  syncBottomReactions(existing, incoming);
++// returns the element which represents the entry in the document afterwards
++function updateTimelineEntry(existing: HTMLElement, incoming: HTMLElement) {
++  if (existing.matches('.timeline-item.comment') && incoming.matches('.timeline-item.comment') && updateCommentEntry(existing, incoming)) {
++    return existing;
++  }
++  existing.replaceWith(incoming);
++  return incoming;
+ }
+ 
+-function morphTimelineEntry(existing: HTMLElement, incoming: HTMLElement) {
+-  if (existing.matches('.timeline-item.comment') && incoming.matches('.timeline-item.comment')) {
+-    morphCommentEntry(existing, incoming);
+-    return;
+-  }
+-  morphElement(existing, incoming);
++function insertTimelineEntry(incoming: HTMLElement, timelineEnd: HTMLElement) {
++  if (incoming.matches('.timeline-item.comment')) appliedServerParts.set(incoming, commentPartsHtml(incoming));
++  timelineEnd.before(incoming);
+ }
+ 
+ function positionTimelineEntry(
+@@ -296,9 +287,9 @@ function applyTimelineOperations(operations: IssueLiveOperation[]) {
+         queuePendingOperation(operation);
+         continue;
+       }
+-      morphTimelineEntry(existing, incoming);
++      currentByKey.set(operation.key, updateTimelineEntry(existing, incoming));
+     } else {
+-      timelineEnd.before(incoming);
++      insertTimelineEntry(incoming, timelineEnd);
+       currentByKey.set(operation.key, incoming);
+       animateInsertedEntry(incoming);
+     }
+@@ -396,10 +387,12 @@ function initLiveCommentSubmit(worker: IssueLiveSharedWorker) {
+ 
+     event.preventDefault();
+     event.stopImmediatePropagation();
++    if (form.classList.contains('is-loading')) return; // quick-submit can fire again while the request is pending
+ 
+     const formData = new FormData(form);
+     if (submitter?.name) formData.append(submitter.name, submitter.value);
+ 
++    const editor = getComboMarkdownEditor(form.querySelector('.combo-markdown-editor'));
+     submitter?.setAttribute('disabled', '');
+     form.classList.add('is-loading');
+     try {
+@@ -419,10 +412,12 @@ function initLiveCommentSubmit(worker: IssueLiveSharedWorker) {
+         throw new Error(responseJson?.errorMessage || `Unable to create comment: ${response.statusText}`);
+       }
+ 
+-      const editor = getComboMarkdownEditor(form.querySelector('.combo-markdown-editor'));
+-      editor?.value('');
+-      editor?.textarea.dispatchEvent(new Event('input', {bubbles: true}));
+-      editor?.dropzoneReloadFiles();
++      if (editor) {
++        editor.value('');
++        editor.textarea.dispatchEvent(new Event('input', {bubbles: true}));
++        // the page is not reloaded, so the submitted attachments must not be re-sent (and moved) by the next comment
++        editor.dropzoneSubmitClear();
++      }
+       worker.refresh();
+     } catch (error) {
+       console.error(error);
+@@ -430,6 +425,7 @@ function initLiveCommentSubmit(worker: IssueLiveSharedWorker) {
+     } finally {
+       submitter?.removeAttribute('disabled');
+       form.classList.remove('is-loading');
++      if (editor) triggerUploadStateChanged(editor.container); // restore the buttons' state for the now empty editor
+     }
+   }, {capture: true});
+ }
+-- 
+2.55.0
+

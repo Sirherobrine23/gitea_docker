@@ -1,4 +1,4 @@
-From 2999d25d929f9579010839949f523ba8b382d8b6 Mon Sep 17 00:00:00 2001
+From 573e6ff08228979f2083f89b35befef1f9fc93e7 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Sat, 6 Jun 2026 13:48:25 -0300
 Subject: [PATCH] Add options to changes run runner and enable cache
@@ -12,7 +12,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  4 files changed, 86 insertions(+), 25 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
-index 0ff68a34..922541f4 100644
+index f7186082..7ed9d1d1 100644
 --- a/internal/app/cmd/cache-server.go
 +++ b/internal/app/cmd/cache-server.go
 @@ -16,9 +16,10 @@ import (
@@ -29,8 +29,8 @@ index 0ff68a34..922541f4 100644
  }
  
  func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
-@@ -31,9 +32,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
- 		initLogging(cfg)
+@@ -34,9 +35,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 		}
  
  		var (
 -			dir  = cfg.Cache.Dir
@@ -43,7 +43,7 @@ index 0ff68a34..922541f4 100644
  		)
  
  		// cacheArgs has higher priority
-@@ -43,11 +45,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+@@ -46,11 +48,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
  		if cacheArgs.Host != "" {
  			host = cacheArgs.Host
  		}
@@ -101,10 +101,10 @@ index e6fadd9b..c5c62c00 100644
  	rootCmd.AddCommand(cacheCmd)
  
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index 787f4a63..46bd9528 100644
+index 640f5d5d..fb2c590f 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
-@@ -40,6 +40,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -41,6 +41,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  			return fmt.Errorf("invalid configuration: %w", err)
  		}
  
@@ -136,7 +136,7 @@ index 787f4a63..46bd9528 100644
  		initLogging(cfg)
  		log.Infoln("Starting runner daemon")
  
-@@ -240,8 +265,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -253,8 +278,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
  
  type daemonArgs struct {

@@ -1,7 +1,7 @@
-From 58fc970e2a27b8ede7f6af601c670e706cfcff1e Mon Sep 17 00:00:00 2001
+From f02ab5f789f58ca23db4c9f2fd58d16d45d765c0 Mon Sep 17 00:00:00 2001
 From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 Date: Tue, 30 Jun 2026 15:57:18 -0300
-Subject: [PATCH 1/7] add load env config
+Subject: [PATCH 1/9] add load env config
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
@@ -9,7 +9,7 @@ Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
  1 file changed, 1 insertion(+)
 
 diff --git a/cmd/main.go b/cmd/main.go
-index 66b2fba..cc68abf 100644
+index 66b2fba461..cc68abf2a5 100644
 --- a/cmd/main.go
 +++ b/cmd/main.go
 @@ -77,6 +77,7 @@ func prepareWorkPathAndCustomConf(cmd *cli.Command) {
@@ -21,5 +21,5 @@ index 66b2fba..cc68abf 100644
  
  type AppVersion struct {
 -- 
-2.43.0
+2.55.0
 
