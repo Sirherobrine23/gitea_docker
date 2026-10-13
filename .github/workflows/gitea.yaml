@@ -44,6 +44,7 @@ jobs:
         run: go run .
         env:
           GITEA_REPO: "https://github.com/go-gitea/gitea.git"
+          FORCE_BUILD: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
 
   gitea-build:
     runs-on: ubuntu-latest

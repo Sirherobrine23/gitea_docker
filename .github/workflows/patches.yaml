@@ -1,0 +1,72 @@
+name: Validate patched sources
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+concurrency:
+  group: patches-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - component: act
+            repository: Sirherobrine23/gitea-runner
+            ref: main
+          - component: gitea
+            repository: go-gitea/gitea
+            ref: main
+          - component: gitea
+            repository: go-gitea/gitea
+            ref: release
+    steps:
+      - uses: actions/checkout@v6
+      - name: Fetch and patch source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REPO: ${{ matrix.repository }}
+          SOURCE_REF: ${{ matrix.ref }}
+          COMPONENT: ${{ matrix.component }}
+        run: |
+          ref="$SOURCE_REF"
+          if [ "$ref" = release ]; then
+            ref=$(gh api "repos/$SOURCE_REPO/releases/latest" --jq .tag_name)
+          fi
+          git clone --depth 1 --branch "$ref" "https://github.com/$SOURCE_REPO.git" source
+          sh patches/apply.sh "$PWD/source" "$PWD/patches/$COMPONENT" "$ref"
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: source/go.mod
+          cache-dependency-path: source/go.sum
+      - name: Runner build and tests
+        if: matrix.component == 'act'
+        working-directory: source
+        run: |
+          make
+          go test ./internal/app/cmd
+      - uses: actions/setup-node@v6
+        if: matrix.component == 'gitea'
+        with:
+          node-version: '24'
+      - name: Gitea build and live update tests
+        if: matrix.component == 'gitea'
+        working-directory: source
+        env:
+          TAGS: bindata timetzdata
+        run: |
+          npm install --global corepack --force
+          corepack enable pnpm
+          pnpm install --frozen-lockfile
+          make tidy
+          make frontend backend
+          go test ./routers/web/repo ./services/websocket -run 'Test(IssueLive|IssueNotifier)'

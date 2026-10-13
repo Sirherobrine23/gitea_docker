@@ -6,6 +6,23 @@ This gitea build have base to run gitea, bases is `debian:sid`, installed softwa
 - Gnupg
 - Gitea
 
+## Patch validation
+
+`patches/apply.sh` applies patches in version order and stops on the first
+failure. A release such as `v1.27.2` selects `patches/gitea/1.27/` when that
+directory exists; otherwise the root series is used.
+
+For example, with an unmodified Gitea checkout at `/tmp/gitea`:
+
+```sh
+sh patches/apply.sh /tmp/gitea "$PWD/patches/gitea" main
+```
+
+The `Validate patched sources` workflow builds the patched runner, Gitea main,
+and the latest stable Gitea release, including the live update tests. Pushes to
+`main` rebuild both image workflows; manual Gitea runs also force a rebuild even
+when the upstream version is already published.
+
 ## Run
 
 Docker:

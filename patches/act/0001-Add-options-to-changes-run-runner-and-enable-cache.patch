@@ -5,11 +5,11 @@ Subject: [PATCH] Add options to changes run runner and enable cache
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- internal/app/cmd/cache-server.go | 21 ++++++++++-----
+ internal/app/cmd/cache-server.go | 18 ++++++++++------
  internal/app/cmd/cmd.go          | 14 ++++++++++
  internal/app/cmd/daemon.go       | 30 +++++++++++++++++++--
  internal/app/cmd/register.go     | 46 +++++++++++++++++++++-----------
- 4 files changed, 86 insertions(+), 25 deletions(-)
+ 4 files changed, 83 insertions(+), 25 deletions(-)
 
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
 index f7186082..7ed9d1d1 100644
@@ -43,15 +43,12 @@ index f7186082..7ed9d1d1 100644
  		)
  
  		// cacheArgs has higher priority
-@@ -46,11 +48,16 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+@@ -46,11 +48,13 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
  		if cacheArgs.Host != "" {
  			host = cacheArgs.Host
  		}
 +		if cacheArgs.Secret != "" {
 +			secret = cacheArgs.Secret
-+		}
-+		if cacheArgs.Port != 0 {
-+			port = cacheArgs.Port
 +		}
  		if cacheArgs.Port != 0 {
  			port = cacheArgs.Port
@@ -79,7 +76,7 @@ index e6fadd9b..c5c62c00 100644
  	daemonCmd.Flags().BoolVar(&daemArgs.Once, "once", false, "Run one job then exit")
  	daemonCmd.Flags().StringVar(&daemArgs.Labels, "labels", os.Getenv("GITEA_RUNNER_LABELS"), "Runner labels, comma separated. Overrides the labels of an already registered runner")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalServer, "cache-server", "", "External Server specifies the URL of external cache server")
-+	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Leave empty to keep the legacy unauthenticated behavior.")
++	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Cache.ExternalSecret, "cache-server-secret", "", "ExternalSecret is a shared secret between this runner and an external act_runner cache-server, enabling per-job ACTIONS_RUNTIME_TOKEN authentication and repo scoping over the network. Required whenever an external cache server is configured.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Host.WorkdirParent, "host-workdir-parent", "", "WorkdirParent specifies the parent directory for the host's working directory.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Network, "container-network", "", "Network specifies the network for the container.")
 +	daemonCmd.Flags().StringVar(&daemArgs.CommandLine.Container.Options, "container-options", "", "Options specifies additional options for the container.")
@@ -134,7 +131,7 @@ index 640f5d5d..fb2c590f 100644
 +		cfg.Container.RequireDocker = daemArgs.CommandLine.Container.RequireDocker || cfg.Container.RequireDocker
 +
  		initLogging(cfg)
- 		log.Infoln("Starting runner daemon")
+ 		logging.Info("Starting runner daemon")
  
 @@ -253,8 +278,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  }
@@ -212,7 +209,7 @@ index 16408ff7..19c6c600 100644
  	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
  	// command line flag.
 @@ -339,6 +345,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
- 		log.WithError(err).Errorf("Invalid input, please re-run act command.")
+ 		logging.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
 +

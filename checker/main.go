@@ -221,6 +221,7 @@ func getDescribeLike(repo *git.Repository, head *plumbing.Reference) string {
 
 func main() {
 	Releases := []*Output{}
+	forceBuild := os.Getenv("FORCE_BUILD") == "true"
 
 	fmt.Println("Geting latest tag release")
 	_, tagRelease, err := LatestTag(false)
@@ -239,7 +240,7 @@ func main() {
 	}
 
 	hash, err := GetVersionFromRegistry(tagRelease)
-	if err != nil || hash == "" {
+	if forceBuild || err != nil || hash == "" {
 		fmt.Printf("New tag release: %q\n", tagRelease)
 		Releases = append(Releases, &Output{
 			DockerTag:    tagRelease,
@@ -254,8 +255,8 @@ func main() {
 	}
 
 	hash, err = GetVersionFromRegistry("latest")
-	if err == nil {
-		if hash == "" || !(hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
+	if forceBuild || err == nil {
+		if forceBuild || hash == "" || !(hash == gitea_version || strings.HasPrefix(mainBranch.Hash().String(), hash)) {
 			fmt.Printf("New nightly docker build, %q => %q\n", hash, gitea_version)
 			Releases = append(Releases, &Output{
 				DockerTag:    "latest",

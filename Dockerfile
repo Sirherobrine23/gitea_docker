@@ -41,7 +41,7 @@ EOF
 FROM base_sys AS gitea_runner_base
 WORKDIR /build
 COPY --from=runner_code /go.mod /go.sum ./
-RUN go mod tidy && go mod download
+RUN go mod download
 COPY --from=runner_code / ./
 RUN git fetch --unshallow --tags && \
   LATEST_TAG=$(git tag --list --sort=-v:refname | head -n 1) && \
@@ -52,23 +52,21 @@ RUN git fetch --unshallow --tags && \
   else \
     echo "$LATEST_TAG+$COMMITS_AHEAD-g$COMMIT_HASH" | sed 's/^v//' > VERSION; \
   fi
-RUN --mount=type=bind,source=./patches/act/,target=/tmp/build-context \
-    (ls /tmp/build-context) | sort -V | xargs -i{} git apply --ignore-whitespace "/tmp/build-context/{}"
+RUN --mount=type=bind,source=./patches/,target=/tmp/build-context \
+    sh /tmp/build-context/apply.sh /build /tmp/build-context/act main
 RUN go mod tidy && go mod download
 # Build latest gitea runner file
 FROM --platform=$BUILDPLATFORM gitea_runner_base AS runner
 ARG TARGETOS
 ARG TARGETARCH
 ARG TARGETVARIANT
-ARG RUNNER_VERSION="$(shell cat VERSION)" # Makefile get version from file
+ARG RUNNER_VERSION
 RUN --mount=type=cache,target=/root/.cache/go-build \
   --mount=type=cache,target=/root/go/pkg/mod \
   GOOS="$TARGETOS" \
   GOARCH="$TARGETARCH" \
   GOARM="${TARGETVARIANT#v}" \
-  VERSION="$RUNNER_VERSION" \
-  RELASE_VERSION="$RUNNER_VERSION" \
-  make
+  make ${RUNNER_VERSION:+VERSION="$RUNNER_VERSION" RELASE_VERSION="$RUNNER_VERSION"}
 
 ### Gitea
 FROM base_sys AS gitea_builder_base
@@ -76,7 +74,7 @@ ARG GITEA_TAG
 # Copy go mod and node package and download
 WORKDIR /build
 COPY --from=gitea_code /go.mod /go.sum ./
-RUN go mod tidy && go mod download
+RUN go mod download
 # COPY --from=gitea_code /package.json /pnpm-lock.yaml /pnpm-workspace.yaml ./
 COPY --from=gitea_code /package.json /pnpm-*.yaml ./
 RUN <<EOF
@@ -96,32 +94,10 @@ pnpm install --frozen-lockfile
 EOF
 # Copy code
 COPY --from=gitea_code / ./
-RUN --mount=type=bind,source=./patches/gitea/,target=/tmp/build-context <<'EOF'
-set -eu
-
-patch_root=/tmp/build-context
-patch_dir="$patch_root"
-patch_source=patches/gitea/
-normalized_tag=${GITEA_TAG#v}
-release_series=$(printf '%s\n' "$normalized_tag" | sed -nE 's/^([0-9]+)\.([0-9]+)(\..*)?$/\1.\2/p')
-
-# A release-specific series directory takes precedence over the root patches.
-# Examples: 1.27.2 and v1.27.2 both select patches/gitea/1.27/ when it exists.
-if [ -n "$release_series" ] && [ -d "$patch_root/$release_series" ]; then
-  patch_dir="$patch_root/$release_series"
-  patch_source="patches/gitea/$release_series/"
-fi
-
-echo "Gitea ref: $GITEA_TAG"
-echo "Using Gitea patches from: $patch_source"
-
-find "$patch_dir" -maxdepth 1 -type f -name '*.patch' -printf '%f\n' | sort -V | while IFS= read -r patch; do
-  echo "Applying Gitea patch: $patch"
-  git apply --check --ignore-whitespace "$patch_dir/$patch"
-  git apply --ignore-whitespace "$patch_dir/$patch"
-done
-EOF
+RUN --mount=type=bind,source=./patches/,target=/tmp/build-context \
+    sh /tmp/build-context/apply.sh /build /tmp/build-context/gitea "$GITEA_TAG"
 RUN go mod tidy
+RUN make go-licenses
 RUN make frontend
 
 # Build frontend and prepare go build
@@ -136,7 +112,7 @@ RUN --mount=type=cache,target=/root/.cache/go-build \
   TAGS="bindata timetzdata $GITEA_TAGS" \
   GOOS=$TARGETOS \
   GOARCH=$TARGETARCH \
-  GOARM=$TARGETVARIANT \
+  GOARM="${TARGETVARIANT#v}" \
   make backend
 
 # Gitea latest image

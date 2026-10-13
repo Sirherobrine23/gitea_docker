@@ -6,9 +6,9 @@ Subject: [PATCH 3/9] add simples block
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
  cmd/web.go                  |  14 +++
- modules/setting/blockers.go | 204 ++++++++++++++++++++++++++++++++++++
+ modules/setting/blockers.go | 207 ++++++++++++++++++++++++++++++++++++
  modules/setting/setting.go  |   1 +
- 3 files changed, 219 insertions(+)
+ 3 files changed, 222 insertions(+)
  create mode 100644 modules/setting/blockers.go
 
 diff --git a/cmd/web.go b/cmd/web.go
@@ -41,7 +41,10 @@ new file mode 100644
 index 0000000000..ff338adc97
 --- /dev/null
 +++ b/modules/setting/blockers.go
-@@ -0,0 +1,204 @@
+@@ -0,0 +1,207 @@
++// Copyright 2026 The Gitea Authors. All rights reserved.
++// SPDX-License-Identifier: MIT
++
 +package setting
 +
 +import (
