@@ -8,6 +8,13 @@ This gitea build have base to run gitea, bases is `debian:sid`, installed softwa
 
 ## Patch validation
 
+The root Gitea patches track upstream `main`. The `28.1` series retains the
+stable release's issue context menu API; the main series uses the newer
+`ConvContentType` and `ConvContentItem` arguments.
+
+Build tools use the official Go 1.27.2 and Node 24 images on Debian Bookworm.
+This avoids linking the build's Node.js to libraries in Debian sid transitions.
+
 `patches/apply.sh` applies patches in version order and stops on the first
 failure. A release such as `v1.27.2` selects `patches/gitea/1.27/` when that
 directory exists; otherwise the root series is used.

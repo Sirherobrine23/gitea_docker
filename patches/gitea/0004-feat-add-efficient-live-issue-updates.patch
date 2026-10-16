@@ -1137,7 +1137,7 @@ index dbf2712e10..d83f24d5d2 100644
 -							{{if not $.Repository.IsArchived}}
 -								{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
 -							{{end}}
--							{{template "repo/issue/view_content/context_menu" dict "item" .Issue "delete" false "issue" true "diff" false "IsCommentPoster" $.IsIssuePoster}}
+-							{{template "repo/issue/view_content/context_menu" dict "ConvContentType" "issue_main" "ConvContentItem" .Issue}}
 -						</div>
 -					</div>
 -					<div class="ui attached segment comment-body" role="article">
@@ -1220,7 +1220,7 @@ index 0000000000..2a8b74c80c
 +				{{if not $.Repository.IsArchived}}
 +					{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
 +				{{end}}
-+				{{template "repo/issue/view_content/context_menu" dict "item" .Issue "delete" false "issue" true "diff" false "IsCommentPoster" $.IsIssuePoster}}
++				{{template "repo/issue/view_content/context_menu" dict "ConvContentType" "issue_main" "ConvContentItem" .Issue}}
 +			</div>
 +		</div>
 +		<div class="ui attached segment comment-body" role="article">

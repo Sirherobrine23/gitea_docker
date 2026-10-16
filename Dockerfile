@@ -16,13 +16,16 @@ FROM --platform=$BUILDPLATFORM scratch AS runner_code
 ADD --keep-git-dir=true https://github.com/Sirherobrine23/gitea-runner.git#main /
 
 ## Base system to build
-FROM --platform=$BUILDPLATFORM debian:sid AS base_sys
+FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS node_toolchain
+
+FROM --platform=$BUILDPLATFORM golang:1.27.2-bookworm AS base_sys
 ARG DEBIAN_FRONTEND="noninteractive"
+COPY --from=node_toolchain /usr/local/ /usr/local/
 RUN <<EOF
 set -eux
 apt-get update
 apt-get install -y --no-install-recommends \
-  golang git wget curl make ca-certificates nodejs npm
+  git wget curl make ca-certificates
 update-ca-certificates
 
 # Install/upgrade Corepack before creating its shims. Do not select an
@@ -62,7 +65,7 @@ ARG TARGETARCH
 ARG TARGETVARIANT
 ARG RUNNER_VERSION
 RUN --mount=type=cache,target=/root/.cache/go-build \
-  --mount=type=cache,target=/root/go/pkg/mod \
+  --mount=type=cache,target=/go/pkg/mod \
   GOOS="$TARGETOS" \
   GOARCH="$TARGETARCH" \
   GOARM="${TARGETVARIANT#v}" \
@@ -108,7 +111,7 @@ ARG TARGETVARIANT
 ARG GITEA_VERSION
 ARG GITEA_TAGS
 RUN --mount=type=cache,target=/root/.cache/go-build \
-  --mount=type=cache,target=/root/go/pkg/mod \
+  --mount=type=cache,target=/go/pkg/mod \
   TAGS="bindata timetzdata $GITEA_TAGS" \
   GOOS=$TARGETOS \
   GOARCH=$TARGETARCH \

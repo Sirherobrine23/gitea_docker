@@ -1,0 +1,942 @@
+From e41f5bde23b9fbc6bf29ecd2920b3a105d3fef7b Mon Sep 17 00:00:00 2001
+From: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+Date: Thu, 16 Jul 2026 07:33:39 -0300
+Subject: [PATCH 5/9] feat: add websocket for update comments
+
+Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
+---
+ routers/web/repo/issue_content_history.go     |   5 +
+ routers/web/repo/issue_live.go                |  10 +
+ routers/web/repo/issue_live_test.go           |   6 +-
+ .../view_content/issue_live_comment.tmpl      |   8 +
+ web_src/js/features/comp/ReactionSelector.ts  |   2 +-
+ web_src/js/features/repo-issue-live.ts        | 338 +++++-------------
+ web_src/js/modules/issue-live-worker.ts       |  75 ++++
+ web_src/js/websocket.sharedworker.ts          | 216 +++++++++++
+ 8 files changed, 416 insertions(+), 244 deletions(-)
+ create mode 100644 templates/repo/issue/view_content/issue_live_comment.tmpl
+ create mode 100644 web_src/js/modules/issue-live-worker.ts
+ create mode 100644 web_src/js/websocket.sharedworker.ts
+
+diff --git a/routers/web/repo/issue_content_history.go b/routers/web/repo/issue_content_history.go
+index 08c27fdee3..e32e7d90f3 100644
+--- a/routers/web/repo/issue_content_history.go
++++ b/routers/web/repo/issue_content_history.go
+@@ -22,6 +22,11 @@ import (
+ 
+ // GetContentHistoryOverview get overview
+ func GetContentHistoryOverview(ctx *context.Context) {
++	if isIssueLiveWebSocketRequest(ctx.Req) {
++		IssueLive(ctx)
++		return
++	}
++
+ 	issue := GetActionIssue(ctx)
+ 	if ctx.Written() {
+ 		return
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index d054d962f9..fc188693c2 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -10,6 +10,7 @@ import (
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"net/http"
+ 	"sort"
+ 	"strconv"
+ 	"strings"
+@@ -94,6 +95,11 @@ type issueLiveSnapshotState struct {
+ 	Hash      [sha256.Size]byte
+ }
+ 
++func isIssueLiveWebSocketRequest(req *http.Request) bool {
++	return strings.EqualFold(req.Header.Get("Upgrade"), "websocket") &&
++		strings.Contains(strings.ToLower(req.Header.Get("Connection")), "upgrade")
++}
++
+ func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
+ 	issue, err := issues_model.GetIssueByIndex(ctx, ctx.Repo.Repository.ID, ctx.PathParamInt64("index"))
+ 	if err != nil {
+@@ -322,6 +328,7 @@ func issueLiveParseSnapshot(rendered string) ([]issueLiveSnapshotEntry, error) {
+ 	entries := make([]issueLiveSnapshotEntry, 0, 16)
+ 	seen := make(map[string]struct{})
+ 	previousCommentKey := ""
++	unkeyedIndex := 0
+ 	for node := snapshot.FirstChild; node != nil; node = node.NextSibling {
+ 		if node.Type != nethtml.ElementNode {
+ 			continue
+@@ -332,6 +339,9 @@ func issueLiveParseSnapshot(rendered string) ([]issueLiveSnapshotEntry, error) {
+ 			previousCommentKey = key
+ 		} else if previousCommentKey != "" && issueLiveNodeHasClass(node, "timeline-item") && issueLiveNodeHasClass(node, "commits-list") {
+ 			key = previousCommentKey + ":commits"
++		} else if issueLiveNodeHasClass(node, "timeline-item") || issueLiveNodeHasClass(node, "timeline-item-group") {
++			key = fmt.Sprintf("unkeyed:%d", unkeyedIndex)
++			unkeyedIndex++
+ 		}
+ 		if key == "" {
+ 			continue
+diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
+index 445cec3a70..602c243104 100644
+--- a/routers/web/repo/issue_live_test.go
++++ b/routers/web/repo/issue_live_test.go
+@@ -20,17 +20,19 @@ func TestIssueLiveParseSnapshot(t *testing.T) {
+ 	<div class="timeline-item event">unkeyed event</div>
+ </div>`)
+ 	require.NoError(t, err)
+-	require.Len(t, entries, 4)
++	require.Len(t, entries, 5)
+ 
+ 	assert.Equal(t, "issue-4", entries[0].Key)
+ 	assert.Equal(t, "issuecomment-10", entries[1].Key)
+ 	assert.Equal(t, "issuecomment-10:commits", entries[2].Key)
+ 	assert.Equal(t, "issuecomment-11", entries[3].Key)
++	assert.Equal(t, "unkeyed:0", entries[4].Key)
+ 
+ 	assert.Equal(t, entries[1].Key, entries[0].BeforeKey)
+ 	assert.Equal(t, entries[2].Key, entries[1].BeforeKey)
+ 	assert.Equal(t, entries[3].Key, entries[2].BeforeKey)
+-	assert.Empty(t, entries[3].BeforeKey)
++	assert.Equal(t, entries[4].Key, entries[3].BeforeKey)
++	assert.Empty(t, entries[4].BeforeKey)
+ }
+ 
+ func TestIssueLiveParseSnapshotRejectsDuplicateKeys(t *testing.T) {
+diff --git a/templates/repo/issue/view_content/issue_live_comment.tmpl b/templates/repo/issue/view_content/issue_live_comment.tmpl
+new file mode 100644
+index 0000000000..abcfa14e36
+--- /dev/null
++++ b/templates/repo/issue/view_content/issue_live_comment.tmpl
+@@ -0,0 +1,8 @@
++<div id="{{.Issue.HashTag}}" class="timeline-item comment issue-content-comment">
++	<div class="content comment-container">
++		{{$reactions := .Issue.Reactions.GroupByType}}
++		{{if $reactions}}
++			{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
++		{{end}}
++	</div>
++</div>
+diff --git a/web_src/js/features/comp/ReactionSelector.ts b/web_src/js/features/comp/ReactionSelector.ts
+index 2016a53c43..54c29fd7a7 100644
+--- a/web_src/js/features/comp/ReactionSelector.ts
++++ b/web_src/js/features/comp/ReactionSelector.ts
+@@ -29,7 +29,7 @@ export function initCompReactionSelector() {
+       commentContainer.insertAdjacentHTML('beforeend', data.html);
+     }
+ 
+-    // Ask the page-owned socket to reconcile immediately. Other sessions are
++    // Ask the live update socket to reconcile immediately. Other sessions are
+     // invalidated by the server-side issue live hub.
+     document.dispatchEvent(new CustomEvent(issueLiveRefreshEvent));
+   });
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index e985b35cb8..fa8e5a3a16 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -2,191 +2,42 @@ import {Idiomorph} from 'idiomorph';
+ import {errorMessage} from '../modules/errors.ts';
+ import {request} from '../modules/fetch.ts';
+ import {showErrorToast} from '../modules/toast.ts';
++import {
++  IssueLiveSharedWorker,
++  type IssueLiveClientMessage,
++  type IssueLiveOperation,
++  type IssueLiveState,
++  type IssueLiveWorkerEvent,
++} from '../modules/issue-live-worker.ts';
+ import {getComboMarkdownEditor} from './comp/ComboMarkdownEditor.ts';
+ import {issueLiveRefreshEvent} from './comp/ReactionSelector.ts';
+ 
+ const timelineItemIdPattern = /^(?:issue|pull)(?:comment)?-\d+$/;
+-const hiddenSocketSuspendDelay = 15000;
+ const pendingOperations = new Map<string, IssueLiveOperation>();
+ const operationBatches: IssueLiveOperation[][] = [];
+ const synchronizedStates = new Map<string, IssueLiveState>();
+ let pendingBaselineStates: IssueLiveState[] | null = null;
+ let synchronizedBaseline = false;
+ let operationFrame: number | null = null;
+-
+-type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
+-
+-type IssueLiveState = {
+-  key: string,
+-  beforeKey?: string,
+-  hash?: string,
+-  contentVersion?: string,
+-  reactionState?: string,
+-  attachmentState?: string,
+-};
+-
+-type IssueLiveOperation = {
+-  action: 'upsert' | 'delete',
+-  key: string,
+-  beforeKey?: string,
+-  html?: string,
+-  hash?: string,
+-};
+-
+-type IssueLiveServerMessage = {
+-  type: 'timeline' | 'baseline',
+-  sequence?: number,
+-  operations?: IssueLiveOperation[],
+-  states?: IssueLiveState[],
+-};
+-
+-type IssueLiveClientMessage = {
+-  type: 'resume',
+-  initialized: boolean,
+-  states: IssueLiveState[],
+-};
++let issueLiveWorker: IssueLiveSharedWorker | null = null;
+ 
+ type TimelineEntry = {
+   key: string,
+   element: HTMLElement,
+ };
+ 
+-class IssueLiveSocket {
+-  url: string;
+-  socket: WebSocket | null = null;
+-  reconnectTimer: number | null = null;
+-  reconnectDelay = 1000;
+-  pendingRefresh = false;
+-  suspended = false;
+-  stopped = false;
+-  onMessage: (message: IssueLiveServerMessage) => void;
+-  onState: (state: ConnectionState) => void;
+-  getResumeMessage: () => IssueLiveClientMessage;
+-
+-  constructor(
+-    url: string,
+-    onMessage: (message: IssueLiveServerMessage) => void,
+-    onState: (state: ConnectionState) => void,
+-    getResumeMessage: () => IssueLiveClientMessage,
+-  ) {
+-    this.url = url;
+-    this.onMessage = onMessage;
+-    this.onState = onState;
+-    this.getResumeMessage = getResumeMessage;
+-  }
+-
+-  start() {
+-    this.stopped = false;
+-    this.suspended = false;
+-    this.connect();
+-  }
+-
+-  connect() {
+-    if (this.stopped || this.suspended) return;
+-    if (this.socket?.readyState === WebSocket.CONNECTING || this.socket?.readyState === WebSocket.OPEN) return;
+-
+-    this.cancelReconnect();
+-    this.onState('connecting');
+-    const socket = new WebSocket(this.url);
+-    this.socket = socket;
+-
+-    socket.addEventListener('open', () => {
+-      if (this.socket !== socket) return;
+-      try {
+-        socket.send(JSON.stringify(this.getResumeMessage()));
+-      } catch (error) {
+-        console.error('Unable to send issue live resume state', error);
+-        socket.close(1011, 'Unable to resume');
+-        return;
+-      }
+-      this.reconnectDelay = 1000;
+-      this.onState('open');
+-      if (this.pendingRefresh) {
+-        this.pendingRefresh = false;
+-        this.refresh();
+-      }
+-    });
+-
+-    socket.addEventListener('message', (event) => {
+-      if (this.socket !== socket) return;
+-      try {
+-        this.onMessage(JSON.parse(String(event.data)) as IssueLiveServerMessage);
+-      } catch (error) {
+-        console.error('Unable to decode issue live message', error);
+-      }
+-    });
+-
+-    socket.addEventListener('error', () => {
+-      if (this.socket === socket) this.onState('error');
+-    });
+-
+-    socket.addEventListener('close', () => {
+-      if (this.socket !== socket) return;
+-      this.socket = null;
+-      this.onState('closed');
+-      this.scheduleReconnect();
+-    });
+-  }
+-
+-  scheduleReconnect() {
+-    if (this.stopped || this.suspended || this.reconnectTimer !== null) return;
+-    const jitter = 0.8 + Math.random() * 0.4;
+-    const delay = Math.round(this.reconnectDelay * jitter);
+-    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
+-    this.reconnectTimer = window.setTimeout(() => {
+-      this.reconnectTimer = null;
+-      this.connect();
+-    }, delay);
+-  }
+-
+-  cancelReconnect() {
+-    if (this.reconnectTimer === null) return;
+-    window.clearTimeout(this.reconnectTimer);
+-    this.reconnectTimer = null;
+-  }
+-
+-  refresh() {
+-    if (this.socket?.readyState === WebSocket.OPEN) {
+-      this.socket.send(JSON.stringify({type: 'refresh'}));
+-    } else {
+-      this.pendingRefresh = true;
+-      this.connect();
+-    }
+-  }
+-
+-  suspend() {
+-    if (this.suspended) return;
+-    this.suspended = true;
+-    this.cancelReconnect();
+-    const socket = this.socket;
+-    this.socket = null;
+-    socket?.close(1000, 'Page hidden');
+-    this.onState('closed');
+-  }
+-
+-  resume() {
+-    if (this.stopped) return;
+-    this.suspended = false;
+-    this.connect();
+-    this.refresh();
+-  }
+-
+-  close() {
+-    this.stopped = true;
+-    this.suspended = true;
+-    this.cancelReconnect();
+-    const socket = this.socket;
+-    this.socket = null;
+-    socket?.close(1000, 'Page closed');
+-    this.onState('closed');
+-  }
+-}
++type MorphOptionsWithCallbacks = {
++  morphStyle: 'innerHTML' | 'outerHTML',
++  callbacks: {
++    beforeNodeMorphed: (oldNode: Node, newNode: Node) => boolean,
++  },
++};
+ 
+ function issueLiveUrl() {
+   const path = window.location.pathname.replace(/\/+$/, '');
+-  const url = new URL(`${path}/live`, window.location.origin);
++  const url = new URL(`${path}/content-history/overview`, window.location.origin);
+   url.protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+-  return url.toString();
++  return url.href;
+ }
+ 
+ function ensureConnectionIndicator() {
+@@ -202,22 +53,23 @@ function ensureConnectionIndicator() {
+   return indicator;
+ }
+ 
+-function updateConnectionIndicator(state: ConnectionState) {
++function updateConnectionIndicator(state: IssueLiveWorkerEvent['state']) {
+   const indicator = ensureConnectionIndicator();
+-  indicator.dataset.state = state;
++  const normalizedState = state ?? 'closed';
++  indicator.setAttribute('data-state', normalizedState);
+   indicator.classList.remove('tw-text-green', 'tw-text-orange', 'tw-text-red');
+ 
+-  if (state === 'open') {
++  if (normalizedState === 'open') {
+     indicator.textContent = '●';
+     indicator.title = 'Live updates connected';
+     indicator.classList.add('tw-text-green');
+-  } else if (state === 'error') {
++  } else if (normalizedState === 'error') {
+     indicator.textContent = '●';
+     indicator.title = 'Live updates connection error';
+     indicator.classList.add('tw-text-red');
+   } else {
+     indicator.textContent = '○';
+-    indicator.title = state === 'connecting' ? 'Connecting live updates' : 'Live updates disconnected';
++    indicator.title = normalizedState === 'connecting' ? 'Connecting live updates' : 'Reconnecting live updates';
+     indicator.classList.add('tw-text-orange');
+   }
+   indicator.setAttribute('aria-label', indicator.title);
+@@ -235,6 +87,7 @@ function timelineCommentId(element: HTMLElement) {
+ function collectTimelineEntries(elements: Iterable<HTMLElement>): TimelineEntry[] {
+   const result: TimelineEntry[] = [];
+   let previousCommentKey: string | null = null;
++  let unkeyedIndex = 0;
+ 
+   for (const element of elements) {
+     let key = timelineCommentId(element);
+@@ -242,10 +95,13 @@ function collectTimelineEntries(elements: Iterable<HTMLElement>): TimelineEntry[
+       previousCommentKey = key;
+     } else if (previousCommentKey && element.matches('.timeline-item.commits-list')) {
+       key = `${previousCommentKey}:commits`;
++    } else if (element.matches('.timeline-item, .timeline-item-group')) {
++      key = `unkeyed:${unkeyedIndex}`;
++      unkeyedIndex += 1;
+     }
+ 
+     if (!key) continue;
+-    element.dataset.issueLiveKey = key;
++    element.setAttribute('data-issue-live-key', key);
+     result.push({key, element});
+   }
+   return result;
+@@ -262,8 +118,8 @@ function currentTimelineEntries(commentList: HTMLElement, timelineEnd: HTMLEleme
+ 
+ function timelineReactionState(element: HTMLElement) {
+   const parts = [...element.querySelectorAll<HTMLElement>('.bottom-reactions [data-reaction-content]')].map((reaction) => {
+-    const content = reaction.dataset.reactionContent ?? '';
+-    const reacted = reaction.dataset.hasReacted ?? '';
++    const content = reaction.getAttribute('data-reaction-content') ?? '';
++    const reacted = reaction.getAttribute('data-has-reacted') ?? '';
+     const count = reaction.querySelector<HTMLElement>('.reaction-count')?.textContent?.trim() ?? '';
+     return `${content}:${reacted}:${count}`;
+   });
+@@ -289,12 +145,24 @@ function initialResumeStates(): IssueLiveState[] {
+   return entries.map((entry, index) => ({
+     key: entry.key,
+     beforeKey: entries[index + 1]?.key,
+-    contentVersion: entry.element.querySelector<HTMLElement>('.edit-content-zone')?.dataset.contentVersion,
++    contentVersion: entry.element.querySelector<HTMLElement>('.edit-content-zone')?.getAttribute('data-content-version') ?? undefined,
+     reactionState: timelineReactionState(entry.element),
+     attachmentState: timelineAttachmentState(entry.element),
+   }));
+ }
+ 
++function currentResumeMessage(): IssueLiveClientMessage {
++  return {
++    type: 'resume',
++    initialized: synchronizedBaseline,
++    states: synchronizedBaseline ? synchronizedStates.values().toArray() : initialResumeStates(),
++  };
++}
++
++function updateSharedWorkerResumeState() {
++  issueLiveWorker?.updateResume(currentResumeMessage());
++}
++
+ function isEditingTimelineEntry(element: HTMLElement) {
+   for (const editZone of element.querySelectorAll<HTMLElement>('.edit-content-zone')) {
+     if (!editZone.classList.contains('tw-hidden')) return true;
+@@ -314,7 +182,7 @@ function parseOperationElement(operation: IssueLiveOperation) {
+   template.innerHTML = operation.html;
+   const element = template.content.firstElementChild;
+   if (!(element instanceof HTMLElement)) return null;
+-  element.dataset.issueLiveKey = operation.key;
++  element.setAttribute('data-issue-live-key', operation.key);
+   return element;
+ }
+ 
+@@ -324,16 +192,15 @@ function queuePendingOperation(operation: IssueLiveOperation) {
+ 
+ function morphElement(existing: HTMLElement, incoming: HTMLElement) {
+   if (existing.outerHTML === incoming.outerHTML) return;
+-  Idiomorph.morph(existing, incoming, {
++  const options: MorphOptionsWithCallbacks = {
+     morphStyle: 'outerHTML',
+     callbacks: {
+       // Fomantic stores module state and handlers on these nodes. Preserve
+       // their identity; global observers initialize newly inserted controls.
+-      beforeNodeMorphed(oldNode: Node) {
+-        return !(oldNode instanceof HTMLElement && oldNode.matches('.comment-header-right, .ui.dropdown'));
+-      },
++      beforeNodeMorphed: (oldNode: Node) => !(oldNode instanceof HTMLElement && oldNode.matches('.comment-header-right, .ui.dropdown')),
+     },
+-  });
++  };
++  Idiomorph.morph(existing, incoming, options);
+ }
+ 
+ function syncBottomReactions(existing: HTMLElement, incoming: HTMLElement) {
+@@ -457,7 +324,9 @@ function applyTimelineOperations(operations: IssueLiveOperation[]) {
+     const offset = scrollAnchor.element.getBoundingClientRect().top - scrollAnchor.top;
+     if (offset) window.scrollBy(0, offset);
+   }
++  updateSharedWorkerResumeState();
+ }
++
+ function applyPendingBaseline() {
+   if (!pendingBaselineStates || operationFrame !== null || operationBatches.length) return;
+ 
+@@ -465,6 +334,7 @@ function applyPendingBaseline() {
+   for (const state of pendingBaselineStates) synchronizedStates.set(state.key, state);
+   pendingBaselineStates = null;
+   synchronizedBaseline = true;
++  updateSharedWorkerResumeState();
+ }
+ 
+ function flushOperationBatches() {
+@@ -515,7 +385,7 @@ function initPendingOperationObserver() {
+   observer.observe(commentList, {attributes: true, subtree: true, attributeFilter: ['class']});
+ }
+ 
+-function initLiveCommentSubmit(socket: IssueLiveSocket) {
++function initLiveCommentSubmit(worker: IssueLiveSharedWorker) {
+   const form = document.querySelector<HTMLFormElement>('#comment-form');
+   if (!form) return;
+ 
+@@ -525,9 +395,7 @@ function initLiveCommentSubmit(socket: IssueLiveSocket) {
+     if (submitter?.id === 'status-button') return;
+ 
+     event.preventDefault();
+-    // The form also has Gitea's delegated .form-fetch-action handler. Stop the
+-    // event before it reaches document or the comment would be submitted twice.
+-    event.stopPropagation();
++    event.stopImmediatePropagation();
+ 
+     const formData = new FormData(form);
+     if (submitter?.name) formData.append(submitter.name, submitter.value);
+@@ -541,7 +409,12 @@ function initLiveCommentSubmit(socket: IssueLiveSocket) {
+         body: formData,
+         headers,
+       });
+-      const responseJson = await response.json().catch(() => null);
++      let responseJson: {errorMessage?: string} | null = null;
++      try {
++        responseJson = await response.json();
++      } catch {
++        // Non-JSON error responses fall back to the HTTP status text.
++      }
+       if (!response.ok) {
+         throw new Error(responseJson?.errorMessage || `Unable to create comment: ${response.statusText}`);
+       }
+@@ -550,7 +423,7 @@ function initLiveCommentSubmit(socket: IssueLiveSocket) {
+       editor?.value('');
+       editor?.textarea.dispatchEvent(new Event('input', {bubbles: true}));
+       editor?.dropzoneReloadFiles();
+-      socket.refresh();
++      worker.refresh();
+     } catch (error) {
+       console.error(error);
+       showErrorToast(errorMessage(error));
+@@ -558,74 +431,57 @@ function initLiveCommentSubmit(socket: IssueLiveSocket) {
+       submitter?.removeAttribute('disabled');
+       form.classList.remove('is-loading');
+     }
+-  });
++  }, {capture: true});
+ }
+ 
+ export function initRepoIssueLive() {
+   if (!document.querySelector('.repository.view.issue .comment-list')) return;
+-  if (!window.WebSocket) return;
++  if (!window.WebSocket || !window.SharedWorker) return;
+ 
++  const worker = new IssueLiveSharedWorker(issueLiveUrl(), currentResumeMessage());
++  issueLiveWorker = worker;
+   let latestSequence = 0;
+-  let connectionState: ConnectionState = 'closed';
+-  const socket = new IssueLiveSocket(
+-    issueLiveUrl(),
+-    (message) => {
+-      if (message.type === 'baseline') {
+-        // The server sends the baseline after the initial operations. Defer
+-        // committing it until those DOM operations have run in animation order.
+-        enqueueBaseline(message.states ?? []);
+-        return;
++  let connectionState: IssueLiveWorkerEvent['state'];
++
++  worker.addMessageEventListener((event: MessageEvent<IssueLiveWorkerEvent>) => {
++    const message = event.data;
++    if (message.type === 'connection-status') {
++      if (message.state === 'connecting' || (message.state === 'open' && connectionState !== 'open')) {
++        // Server sequences are scoped to one WebSocket connection and restart
++        // after reconnecting.
++        latestSequence = 0;
+       }
+-      if (message.type !== 'timeline' || !message.operations) return;
++      connectionState = message.state;
++      updateConnectionIndicator(message.state);
++    } else if (message.type === 'baseline') {
++      enqueueBaseline(message.states ?? []);
++    } else if (message.type === 'timeline' && message.operations) {
+       if ((message.sequence ?? 0) <= latestSequence) return;
+       latestSequence = message.sequence ?? latestSequence + 1;
+       enqueueTimelineOperations(message.operations);
+-    },
+-    (state) => {
+-      if (state === 'connecting' || (state === 'open' && connectionState !== 'open')) {
+-        // Sequence numbers are scoped to one WebSocket connection.
+-        latestSequence = 0;
+-      }
+-      connectionState = state;
+-      updateConnectionIndicator(state);
+-    },
+-    () => ({
+-      type: 'resume',
+-      initialized: synchronizedBaseline,
+-      states: synchronizedBaseline ? [...synchronizedStates.values()] : initialResumeStates(),
+-    }),
+-  );
+-
+-  socket.start();
+-  initLiveCommentSubmit(socket);
++    } else if (message.type === 'worker-error') {
++      console.error(message.message);
++    }
++  });
++  worker.startPort();
++  worker.status();
++  initLiveCommentSubmit(worker);
+   initPendingOperationObserver();
+ 
+-  document.addEventListener(issueLiveRefreshEvent, () => socket.refresh());
++  const refreshFromPageAction = () => worker.refresh();
++  document.addEventListener(issueLiveRefreshEvent, refreshFromPageAction);
+ 
+-  let visibilitySuspendTimer: number | null = null;
+-  const cancelVisibilitySuspend = () => {
+-    if (visibilitySuspendTimer === null) return;
+-    window.clearTimeout(visibilitySuspendTimer);
+-    visibilitySuspendTimer = null;
++  const flushVisiblePendingOperations = () => {
++    if (document.visibilityState !== 'visible') return;
++    flushPendingOperations();
++    updateSharedWorkerResumeState();
+   };
+-  document.addEventListener('visibilitychange', () => {
+-    if (document.visibilityState === 'hidden') {
+-      cancelVisibilitySuspend();
+-      // Browser chrome and mobile task switching can briefly hide the page.
+-      // Keep the socket alive for a grace period to avoid reconnect churn.
+-      visibilitySuspendTimer = window.setTimeout(() => {
+-        visibilitySuspendTimer = null;
+-        socket.suspend();
+-      }, hiddenSocketSuspendDelay);
+-    } else {
+-      cancelVisibilitySuspend();
+-      socket.resume();
+-      flushPendingOperations();
+-    }
+-  });
++  document.addEventListener('visibilitychange', flushVisiblePendingOperations);
++
+   window.addEventListener('pagehide', () => {
+-    cancelVisibilitySuspend();
+-    socket.suspend();
+-  });
+-  window.addEventListener('pageshow', () => socket.resume());
++    document.removeEventListener(issueLiveRefreshEvent, refreshFromPageAction);
++    document.removeEventListener('visibilitychange', flushVisiblePendingOperations);
++    issueLiveWorker = null;
++    worker.close();
++  }, {once: true});
+ }
+diff --git a/web_src/js/modules/issue-live-worker.ts b/web_src/js/modules/issue-live-worker.ts
+new file mode 100644
+index 0000000000..d9dca36975
+--- /dev/null
++++ b/web_src/js/modules/issue-live-worker.ts
+@@ -0,0 +1,75 @@
++export type IssueLiveState = {
++  key: string,
++  beforeKey?: string,
++  hash?: string,
++  contentVersion?: string,
++  reactionState?: string,
++  attachmentState?: string,
++};
++
++export type IssueLiveClientMessage = {
++  type: 'resume',
++  initialized: boolean,
++  states: IssueLiveState[],
++};
++
++export type IssueLiveOperation = {
++  action: 'upsert' | 'delete',
++  key: string,
++  beforeKey?: string,
++  html?: string,
++  hash?: string,
++};
++
++export type IssueLiveWorkerEvent = {
++  type: 'connection-status' | 'timeline' | 'baseline' | 'worker-error',
++  state?: 'connecting' | 'open' | 'closed' | 'error',
++  sequence?: number,
++  operations?: IssueLiveOperation[],
++  states?: IssueLiveState[],
++  message?: string,
++};
++
++export class IssueLiveSharedWorker {
++  sharedWorker: SharedWorker;
++
++  constructor(url: string, resume: IssueLiveClientMessage) {
++    this.sharedWorker = new SharedWorker(
++      new URL('../websocket.sharedworker.ts', import.meta.url),
++      {name: 'issue-live-websocket', type: 'module'},
++    );
++
++    this.sharedWorker.addEventListener('error', (event) => {
++      console.error('issue live worker error', event);
++    });
++    this.sharedWorker.port.addEventListener('messageerror', () => {
++      console.error('unable to deserialize issue live worker message');
++    });
++    this.sharedWorker.port.postMessage({type: 'start', url, resume});
++  }
++
++  addMessageEventListener(listener: (event: MessageEvent<IssueLiveWorkerEvent>) => void) {
++    this.sharedWorker.port.addEventListener('message', listener);
++  }
++
++  startPort() {
++    this.sharedWorker.port.start();
++  }
++
++  updateResume(resume: IssueLiveClientMessage) {
++    this.sharedWorker.port.postMessage({type: 'resume', resume});
++  }
++
++  refresh() {
++    this.sharedWorker.port.postMessage({type: 'refresh'});
++  }
++
++  status() {
++    this.sharedWorker.port.postMessage({type: 'status'});
++  }
++
++  close() {
++    this.sharedWorker.port.postMessage({type: 'close'});
++    this.sharedWorker.port.close();
++  }
++}
+diff --git a/web_src/js/websocket.sharedworker.ts b/web_src/js/websocket.sharedworker.ts
+new file mode 100644
+index 0000000000..43e9372605
+--- /dev/null
++++ b/web_src/js/websocket.sharedworker.ts
+@@ -0,0 +1,216 @@
++export {};
++
++type IssueLiveState = {
++  key: string,
++  beforeKey?: string,
++  hash?: string,
++  contentVersion?: string,
++  reactionState?: string,
++  attachmentState?: string,
++};
++
++type IssueLiveClientMessage = {
++  type: 'resume',
++  initialized: boolean,
++  states: IssueLiveState[],
++};
++
++type WorkerCommand = {
++  type: 'start' | 'refresh' | 'status' | 'close' | 'resume',
++  url?: string,
++  resume?: IssueLiveClientMessage,
++};
++
++type ConnectionState = 'connecting' | 'open' | 'closed' | 'error';
++
++function normalizeResumeMessage(message?: IssueLiveClientMessage): IssueLiveClientMessage {
++  if (message?.type !== 'resume' || !Array.isArray(message.states)) {
++    return {type: 'resume', initialized: false, states: []};
++  }
++  return {type: 'resume', initialized: message.initialized, states: message.states};
++}
++
++class SocketSource {
++  url: string;
++  socket: WebSocket | null = null;
++  clients = new Set<MessagePort>();
++  reconnectTimer: number | null = null;
++  reconnectDelay = 1000;
++  closed = false;
++  pendingRefresh = false;
++  state: ConnectionState = 'closed';
++  resumeMessage: IssueLiveClientMessage;
++
++  constructor(url: string, resumeMessage?: IssueLiveClientMessage) {
++    this.url = url;
++    this.resumeMessage = normalizeResumeMessage(resumeMessage);
++    this.connect();
++  }
++
++  register(port: MessagePort, resumeMessage?: IssueLiveClientMessage) {
++    this.updateResumeMessage(resumeMessage);
++    this.clients.add(port);
++    this.sendStatus(port);
++  }
++
++  deregister(port: MessagePort) {
++    this.clients.delete(port);
++    return this.clients.size;
++  }
++
++  updateResumeMessage(resumeMessage?: IssueLiveClientMessage) {
++    if (resumeMessage) this.resumeMessage = normalizeResumeMessage(resumeMessage);
++  }
++
++  notify(message: Record<string, unknown>) {
++    for (const client of this.clients) {
++      client.postMessage(message);
++    }
++  }
++
++  setState(state: ConnectionState) {
++    this.state = state;
++    this.notify({type: 'connection-status', state});
++  }
++
++  sendStatus(port: MessagePort) {
++    port.postMessage({type: 'connection-status', state: this.state});
++  }
++
++  connect() {
++    if (this.closed || this.socket?.readyState === WebSocket.CONNECTING || this.socket?.readyState === WebSocket.OPEN) return;
++
++    this.setState('connecting');
++    const socket = new WebSocket(this.url);
++    this.socket = socket;
++
++    socket.addEventListener('open', () => {
++      if (this.socket !== socket) return;
++      try {
++        socket.send(JSON.stringify(this.resumeMessage));
++      } catch (error) {
++        this.notify({type: 'worker-error', message: String(error)});
++        socket.close(1011, 'Unable to resume');
++        return;
++      }
++      this.reconnectDelay = 1000;
++      this.setState('open');
++      if (this.pendingRefresh) {
++        this.pendingRefresh = false;
++        this.sendRefresh();
++      }
++    });
++
++    socket.addEventListener('message', (event) => {
++      let message: Record<string, unknown>;
++      try {
++        message = JSON.parse(String(event.data));
++      } catch {
++        message = {type: 'message', data: event.data};
++      }
++      this.notify(message);
++    });
++
++    socket.addEventListener('error', () => {
++      if (this.socket === socket) this.setState('error');
++    });
++
++    socket.addEventListener('close', () => {
++      if (this.socket !== socket) return;
++      this.socket = null;
++      this.setState('closed');
++      this.scheduleReconnect();
++    });
++  }
++
++  scheduleReconnect() {
++    if (this.closed || !this.clients.size || this.reconnectTimer !== null) return;
++    const delay = this.reconnectDelay;
++    this.reconnectDelay = Math.min(this.reconnectDelay * 2, 30000);
++    this.reconnectTimer = self.setTimeout(() => {
++      this.reconnectTimer = null;
++      this.connect();
++    }, delay);
++  }
++
++  sendRefresh() {
++    if (this.socket?.readyState === WebSocket.OPEN) {
++      this.socket.send(JSON.stringify({type: 'refresh'}));
++    } else {
++      this.pendingRefresh = true;
++      this.connect();
++    }
++  }
++
++  close() {
++    this.closed = true;
++    if (this.reconnectTimer !== null) {
++      clearTimeout(this.reconnectTimer);
++      this.reconnectTimer = null;
++    }
++    this.socket?.close(1000, 'No active tabs');
++    this.socket = null;
++    this.setState('closed');
++  }
++}
++
++const sourcesByUrl = new Map<string, SocketSource>();
++const sourcesByPort = new Map<MessagePort, SocketSource>();
++
++function detachPort(port: MessagePort) {
++  const source = sourcesByPort.get(port);
++  if (!source) return;
++
++  sourcesByPort.delete(port);
++  if (source.deregister(port) === 0) {
++    source.close();
++    sourcesByUrl.delete(source.url);
++  }
++}
++
++(self as unknown as SharedWorkerGlobalScope).addEventListener('connect', (event: MessageEvent) => {
++  for (const port of event.ports) {
++    port.addEventListener('message', (messageEvent: MessageEvent<WorkerCommand>) => {
++      const command = messageEvent.data;
++      if (!command?.type) return;
++
++      if (command.type === 'start') {
++        if (!command.url) {
++          port.postMessage({type: 'worker-error', message: 'Missing WebSocket URL'});
++          return;
++        }
++
++        const previous = sourcesByPort.get(port);
++        if (previous?.url === command.url) {
++          previous.updateResumeMessage(command.resume);
++          previous.sendStatus(port);
++          return;
++        }
++        if (previous) detachPort(port);
++
++        let source = sourcesByUrl.get(command.url);
++        if (!source) {
++          source = new SocketSource(command.url, command.resume);
++          sourcesByUrl.set(command.url, source);
++        }
++        source.register(port, command.resume);
++        sourcesByPort.set(port, source);
++      } else if (command.type === 'resume') {
++        sourcesByPort.get(port)?.updateResumeMessage(command.resume);
++      } else if (command.type === 'refresh') {
++        sourcesByPort.get(port)?.sendRefresh();
++      } else if (command.type === 'status') {
++        const source = sourcesByPort.get(port);
++        if (source) {
++          source.sendStatus(port);
++        } else {
++          port.postMessage({type: 'connection-status', state: 'closed'});
++        }
++      } else if (command.type === 'close') {
++        detachPort(port);
++        port.close();
++      }
++    });
++    port.start();
++  }
++});
+-- 
+2.55.0
+

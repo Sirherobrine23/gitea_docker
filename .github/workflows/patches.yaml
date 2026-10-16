@@ -14,6 +14,15 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  toolchain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build and check Docker build tools
+        run: |
+          docker build --target base_sys --tag gitea-build-tools:check .
+          docker run --rm gitea-build-tools:check sh -ec 'go version; node --version; npm --version; corepack --version'
+
   build:
     runs-on: ubuntu-latest
     strategy:
