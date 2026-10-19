@@ -14,6 +14,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  patch-compatibility:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        ref: [v28.1.0, v28.2.0, main]
+    steps:
+      - uses: actions/checkout@v6
+      - name: Apply Gitea patch series
+        env:
+          GITEA_REF: ${{ matrix.ref }}
+        run: |
+          git clone --depth 1 --branch "$GITEA_REF" https://github.com/go-gitea/gitea.git source
+          sh patches/apply.sh "$PWD/source" "$PWD/patches/gitea" "$GITEA_REF"
+
   toolchain:
     runs-on: ubuntu-latest
     steps:

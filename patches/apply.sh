@@ -8,8 +8,13 @@ patch_dir=$patch_root
 normalized_ref=${ref#v}
 release_series=$(printf '%s\n' "$normalized_ref" | sed -nE 's/^([0-9]+)\.([0-9]+)(\..*)?$/\1.\2/p')
 
-if [ -n "$release_series" ] && [ -d "$patch_root/$release_series" ]; then
-  patch_dir="$patch_root/$release_series"
+if [ -n "$release_series" ]; then
+  for series in "$release_series" "${release_series%%.*}"; do
+    if [ -d "$patch_root/$series" ]; then
+      patch_dir="$patch_root/$series"
+      break
+    fi
+  done
 fi
 
 echo "Source ref: $ref"
