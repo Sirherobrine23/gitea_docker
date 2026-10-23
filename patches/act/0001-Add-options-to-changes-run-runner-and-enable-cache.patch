@@ -5,17 +5,11 @@ Subject: [PATCH] Add options to changes run runner and enable cache
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- internal/app/cmd/cache-server.go | 18 ++++++++++------
- internal/app/cmd/cmd.go          | 14 ++++++++++
- internal/app/cmd/daemon.go       | 30 +++++++++++++++++++--
- internal/app/cmd/register.go     | 46 +++++++++++++++++++++-----------
- 4 files changed, 83 insertions(+), 25 deletions(-)
-
 diff --git a/internal/app/cmd/cache-server.go b/internal/app/cmd/cache-server.go
-index f7186082..7ed9d1d1 100644
+index 35bb7da..90bba9c 100644
 --- a/internal/app/cmd/cache-server.go
 +++ b/internal/app/cmd/cache-server.go
-@@ -16,9 +16,10 @@ import (
+@@ -17,9 +17,10 @@ import (
  )
  
  type cacheServerArgs struct {
@@ -29,37 +23,26 @@ index f7186082..7ed9d1d1 100644
  }
  
  func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *cobra.Command, args []string) error {
-@@ -34,9 +35,10 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+@@ -34,14 +35,15 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
+ 			return errors.New("cache-server does not support cache.s3; set cache.s3 on the runners instead")
  		}
  
- 		var (
--			dir  = cfg.Cache.Dir
--			host = cfg.Cache.Host
--			port = cfg.Cache.Port
-+			dir    = cfg.Cache.Dir
-+			host   = cfg.Cache.Host
-+			port   = cfg.Cache.Port
-+			secret = cfg.Cache.ExternalSecret
- 		)
- 
- 		// cacheArgs has higher priority
-@@ -46,11 +48,13 @@ func runCacheServer(configFile *string, cacheArgs *cacheServerArgs) func(cmd *co
- 		if cacheArgs.Host != "" {
- 			host = cacheArgs.Host
- 		}
-+		if cacheArgs.Secret != "" {
-+			secret = cacheArgs.Secret
-+		}
- 		if cacheArgs.Port != 0 {
- 			port = cacheArgs.Port
- 		}
- 
--		secret := cfg.Cache.ExternalSecret
- 		if secret == "" {
+-		if cfg.Cache.ExternalSecret == "" {
++		secret := cmp.Or(cacheArgs.Secret, cfg.Cache.ExternalSecret)
++		if secret == "" {
  			return errors.New("cache.external_secret (or cache.external_secret_file) must be set for cache-server; configure the same value on each runner that points at this server via cache.external_server")
  		}
+ 		cacheHandler, err := artifactcache.StartHandler(artifactcache.Options{
+ 			Dir:            cmp.Or(cacheArgs.Dir, cfg.Cache.Dir),
+ 			OutboundIP:     cmp.Or(cacheArgs.Host, cfg.Cache.Host),
+ 			Port:           cmp.Or(cacheArgs.Port, cfg.Cache.Port),
+-			InternalSecret: cfg.Cache.ExternalSecret,
++			InternalSecret: secret,
+ 			Policy:         run.CachePolicy(cfg),
+ 			Logger:         logging.Default().With("module", "cache_request"),
+ 		})
 diff --git a/internal/app/cmd/cmd.go b/internal/app/cmd/cmd.go
-index e6fadd9b..c5c62c00 100644
+index e6fadd9..5f54d91 100644
 --- a/internal/app/cmd/cmd.go
 +++ b/internal/app/cmd/cmd.go
 @@ -37,6 +37,8 @@ func Execute(ctx context.Context) {
@@ -98,10 +81,10 @@ index e6fadd9b..c5c62c00 100644
  	rootCmd.AddCommand(cacheCmd)
  
 diff --git a/internal/app/cmd/daemon.go b/internal/app/cmd/daemon.go
-index 640f5d5d..fb2c590f 100644
+index 163c81f..b29345d 100644
 --- a/internal/app/cmd/daemon.go
 +++ b/internal/app/cmd/daemon.go
-@@ -41,6 +41,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -44,6 +44,31 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
  			return fmt.Errorf("invalid configuration: %w", err)
  		}
  
@@ -133,7 +116,7 @@ index 640f5d5d..fb2c590f 100644
  		initLogging(cfg)
  		logging.Info("Starting runner daemon")
  
-@@ -253,8 +278,9 @@ func runDaemon(ctx context.Context, daemArgs *daemonArgs, configFile *string) fu
+@@ -288,8 +313,9 @@ func removeEphemeralRegistration(reg *config.Registration, file string) {
  }
  
  type daemonArgs struct {
@@ -146,10 +129,10 @@ index 640f5d5d..fb2c590f 100644
  
  // resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index 16408ff7..19c6c600 100644
+index 6c1ad10..939212b 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
-@@ -73,13 +73,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
+@@ -63,13 +63,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
  
  // registerArgs represents the arguments for register command
  type registerArgs struct {
@@ -172,7 +155,7 @@ index 16408ff7..19c6c600 100644
  }
  
  type registerStage int8
-@@ -104,11 +106,13 @@ var defaultLabels = []string{
+@@ -94,11 +96,13 @@ var defaultLabels = []string{
  }
  
  type registerInputs struct {
@@ -191,8 +174,8 @@ index 16408ff7..19c6c600 100644
  }
  
  func (r *registerInputs) validate() error {
-@@ -230,10 +234,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
- 		token = envToken
+@@ -210,10 +214,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
+ 		}
  	}
  	inputs := &registerInputs{
 -		InstanceAddr: strings.TrimSpace(regArgs.InstanceAddr),
@@ -208,7 +191,7 @@ index 16408ff7..19c6c600 100644
  	}
  	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
  	// command line flag.
-@@ -339,6 +345,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+@@ -319,6 +325,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
  		logging.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
@@ -223,6 +206,3 @@ index 16408ff7..19c6c600 100644
  	if err := doRegister(ctx, cfg, inputs); err != nil {
  		return fmt.Errorf("failed to register runner: %w", err)
  	}
--- 
-2.55.0
-

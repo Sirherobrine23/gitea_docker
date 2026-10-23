@@ -10,7 +10,9 @@ This gitea build have base to run gitea, bases is `debian:sid`, installed softwa
 
 The root Gitea patches track upstream `main`. The `28` series retains the
 28.x releases' issue context menu API; the main series uses the newer
-`ConvContentType` and `ConvContentItem` arguments.
+`ConvContentType` and `ConvContentItem` arguments and the shared reaction
+template/picker. Live snapshots supply the same allowed reactions as the normal
+issue view and include reaction counts in their resume state.
 
 Build tools use the official Go 1.27.2 and Node 24 images on Debian Bookworm.
 This avoids linking the build's Node.js to libraries in Debian sid transitions.

@@ -1,0 +1,95 @@
+Subject: [PATCH] fix: track shared reaction counts in live updates
+
+Keep reaction counts in the resume state after the shared reaction template
+migration. Ignore picker choices, which may move outside the timeline when
+Tippy opens, and keep the browser and server state encodings aligned.
+
+---
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index 3e37e2f..23aff12 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -249,6 +249,9 @@ func issueLiveReactionState(node *nethtml.Node) string {
+ 	var collect func(*nethtml.Node)
+ 	collect = func(current *nethtml.Node) {
+ 		if current.Type == nethtml.ElementNode {
++			if issueLiveNodeHasClass(current, "reaction-picker") {
++				return
++			}
+ 			if reaction := issueLiveNodeAttribute(current, "data-reaction-content"); reaction != "" {
+ 				count := ""
+ 				if countNode := issueLiveFindDescendantByClass(current, "reaction-count"); countNode != nil {
+diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
+index 2479421..d2ef8af 100644
+--- a/routers/web/repo/issue_live_test.go
++++ b/routers/web/repo/issue_live_test.go
+@@ -4,6 +4,7 @@
+ package repo
+ 
+ import (
++	"fmt"
+ 	"testing"
+ 	"time"
+ 
+@@ -222,3 +223,24 @@ func TestIssueLiveServerStatesCanExcludePendingUpserts(t *testing.T) {
+ 	require.Len(t, states, 1)
+ 	assert.Equal(t, "issuecomment-10", states[0].Key)
+ }
++
++func TestIssueLiveReactionStateIgnoresPickerAndTracksCounts(t *testing.T) {
++	const markup = `<div data-issue-live-snapshot><div id="issue-4" class="timeline-item">
++<div class="bottom-reactions">
++<div class="reaction-picker"><a data-reaction-content="laugh" data-has-reacted="false">picker</a></div>
++<a data-reaction-content="heart" data-has-reacted="true"><span class="reaction-count">%d</span></a>
++</div></div></div>`
++	previous, err := issueLiveParseSnapshot(fmt.Sprintf(markup, 1))
++	require.NoError(t, err)
++	require.Len(t, previous, 1)
++	assert.Equal(t, "heart:true:1", previous[0].ReactionState)
++
++	current, err := issueLiveParseSnapshot(fmt.Sprintf(markup, 2))
++	require.NoError(t, err)
++	assert.Equal(t, "heart:true:2", current[0].ReactionState)
++	states := []issueLiveClientState{{Key: "issue-4", ReactionState: previous[0].ReactionState}}
++	baseline := issueLiveInitialSnapshotStates(states, current)
++	operations, _ := issueLiveDiffSnapshot(baseline, current)
++	require.Len(t, operations, 1)
++	assert.Equal(t, "upsert", operations[0].Action)
++}
+diff --git a/templates/shared/reactions.tmpl b/templates/shared/reactions.tmpl
+index b716be2..429d958 100644
+--- a/templates/shared/reactions.tmpl
++++ b/templates/shared/reactions.tmpl
+@@ -21,7 +21,7 @@
+ 		data-tooltip-placement="bottom-start"
+ 		data-reaction-content="{{$key}}" data-has-reacted="{{$hasReacted}}">
+ 		<span class="reaction">{{ReactionToEmoji $key}}</span>
+-		<span>{{len $value}}</span>
++		<span class="reaction-count">{{len $value}}</span>
+ 	</a>
+ {{end}}
+ </div>
+diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
+index 3645bb0..e0fdbc5 100644
+--- a/web_src/js/features/repo-issue-live.ts
++++ b/web_src/js/features/repo-issue-live.ts
+@@ -112,12 +112,13 @@ function currentTimelineEntries(commentList: HTMLElement, timelineEnd: HTMLEleme
+ }
+ 
+ function timelineReactionState(element: HTMLElement) {
+-  const parts = [...element.querySelectorAll<HTMLElement>('.bottom-reactions [data-reaction-content]')].map((reaction) => {
+-    const content = reaction.getAttribute('data-reaction-content') ?? '';
+-    const reacted = reaction.getAttribute('data-has-reacted') ?? '';
+-    const count = reaction.querySelector<HTMLElement>('.reaction-count')?.textContent?.trim() ?? '';
+-    return `${content}:${reacted}:${count}`;
+-  });
++  const parts = [...element.querySelectorAll<HTMLElement>('.bottom-reactions [data-reaction-content]')]
++    .filter((reaction) => !reaction.closest('.reaction-picker')).map((reaction) => {
++      const content = reaction.getAttribute('data-reaction-content') ?? '';
++      const reacted = reaction.getAttribute('data-has-reacted') ?? '';
++      const count = reaction.querySelector<HTMLElement>('.reaction-count')?.textContent?.trim() ?? '';
++      return `${content}:${reacted}:${count}`;
++    });
+   parts.sort();
+   return parts.join('|');
+ }

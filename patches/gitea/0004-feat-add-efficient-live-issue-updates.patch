@@ -11,32 +11,11 @@ connection to Gitea's graceful-shutdown context.
 
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- routers/web/repo/issue.go                     |   7 +
- routers/web/repo/issue_comment.go             |   4 +
- routers/web/repo/issue_label.go               |   1 +
- routers/web/repo/issue_live.go                | 678 ++++++++++++++++++
- routers/web/repo/issue_live_hub.go            |  71 ++
- routers/web/repo/issue_live_test.go           | 171 +++++
- routers/web/web.go                            |   1 +
- templates/repo/issue/view_content.tmpl        |  64 +-
- .../issue/view_content/comments_live.tmpl     |   4 +
- .../issue/view_content/issue_comment.tmpl     |  63 ++
- web_src/js/features/comp/ReactionSelector.ts  |   6 +
- web_src/js/features/repo-issue-live.ts        | 631 ++++++++++++++++
- web_src/js/index.ts                           |   2 +
- 13 files changed, 1640 insertions(+), 63 deletions(-)
- create mode 100644 routers/web/repo/issue_live.go
- create mode 100644 routers/web/repo/issue_live_hub.go
- create mode 100644 routers/web/repo/issue_live_test.go
- create mode 100644 templates/repo/issue/view_content/comments_live.tmpl
- create mode 100644 templates/repo/issue/view_content/issue_comment.tmpl
- create mode 100644 web_src/js/features/repo-issue-live.ts
-
 diff --git a/routers/web/repo/issue.go b/routers/web/repo/issue.go
-index 511085bcdd..b475c3ece7 100644
+index d00f5d0..5cb0e3a 100644
 --- a/routers/web/repo/issue.go
 +++ b/routers/web/repo/issue.go
-@@ -298,6 +298,7 @@ func UpdateIssueTitle(ctx *context.Context) {
+@@ -293,6 +293,7 @@ func UpdateIssueTitle(ctx *context.Context) {
  		return
  	}
  
@@ -44,7 +23,7 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSON(http.StatusOK, map[string]any{
  		"title": issue.Title,
  	})
-@@ -322,6 +323,7 @@ func UpdateIssueRef(ctx *context.Context) {
+@@ -317,6 +318,7 @@ func UpdateIssueRef(ctx *context.Context) {
  		return
  	}
  
@@ -52,7 +31,7 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSON(http.StatusOK, map[string]any{
  		"ref": ref,
  	})
-@@ -371,6 +373,7 @@ func UpdateIssueContent(ctx *context.Context) {
+@@ -366,6 +368,7 @@ func UpdateIssueContent(ctx *context.Context) {
  		return
  	}
  
@@ -60,7 +39,7 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSON(http.StatusOK, map[string]any{
  		"content":        commentContentHTML(ctx, content),
  		"contentVersion": issue.ContentVersion,
-@@ -401,6 +404,7 @@ func UpdateIssueDeadline(ctx *context.Context) {
+@@ -396,6 +399,7 @@ func UpdateIssueDeadline(ctx *context.Context) {
  		return
  	}
  
@@ -68,7 +47,7 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSONRedirect("")
  }
  
-@@ -434,6 +438,7 @@ func UpdateIssueMilestone(ctx *context.Context) {
+@@ -429,6 +433,7 @@ func UpdateIssueMilestone(ctx *context.Context) {
  		}
  	}
  
@@ -76,7 +55,7 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSONOK()
  }
  
-@@ -478,6 +483,7 @@ func UpdateIssueAssignee(ctx *context.Context) {
+@@ -473,6 +478,7 @@ func UpdateIssueAssignee(ctx *context.Context) {
  			}
  		}
  	}
@@ -84,19 +63,19 @@ index 511085bcdd..b475c3ece7 100644
  	ctx.JSONOK()
  }
  
-@@ -555,6 +561,7 @@ func ChangeIssueReaction(ctx *context.Context) {
+@@ -537,6 +543,7 @@ func ChangeIssueReaction(ctx *context.Context) {
  		return
  	}
  
 +	notifyIssueLiveIssue(issue)
- 	if len(issue.Reactions) == 0 {
- 		ctx.JSON(http.StatusOK, map[string]any{
- 			"empty": true,
+ 	renderReactions(ctx, fmt.Sprintf("%s/issues/%d/reactions", ctx.Repo.RepoLink, issue.Index), issue.Reactions, setting.UI.Reactions)
+ }
+ 
 diff --git a/routers/web/repo/issue_comment.go b/routers/web/repo/issue_comment.go
-index df90827754..e61ad7f9ca 100644
+index 0749cd0..c60d913 100644
 --- a/routers/web/repo/issue_comment.go
 +++ b/routers/web/repo/issue_comment.go
-@@ -183,6 +183,7 @@ func NewComment(ctx *context.Context) {
+@@ -144,6 +144,7 @@ func NewComment(ctx *context.Context) {
  		}
  	} // end if: handle close or reopen
  
@@ -104,7 +83,7 @@ index df90827754..e61ad7f9ca 100644
  	ctx.JSONRedirect(redirect)
  }
  
-@@ -263,6 +264,7 @@ func UpdateCommentContent(ctx *context.Context) {
+@@ -232,6 +233,7 @@ func UpdateCommentContent(ctx *context.Context) {
  		}
  	}
  
@@ -112,7 +91,7 @@ index df90827754..e61ad7f9ca 100644
  	ctx.JSON(http.StatusOK, map[string]any{
  		"content":        commentContentHTML(ctx, renderedContent),
  		"contentVersion": comment.ContentVersion,
-@@ -301,6 +303,7 @@ func DeleteComment(ctx *context.Context) {
+@@ -251,6 +253,7 @@ func DeleteComment(ctx *context.Context) {
  		return
  	}
  
@@ -120,19 +99,19 @@ index df90827754..e61ad7f9ca 100644
  	ctx.Status(http.StatusOK)
  }
  
-@@ -389,6 +392,7 @@ func ChangeCommentReaction(ctx *context.Context) {
+@@ -300,6 +303,7 @@ func ChangeCommentReaction(ctx *context.Context) {
  		return
  	}
  
 +	notifyIssueLiveIssue(comment.Issue)
- 	if len(comment.Reactions) == 0 {
- 		ctx.JSON(http.StatusOK, map[string]any{
- 			"empty": true,
+ 	renderReactions(ctx, fmt.Sprintf("%s/comments/%d/reactions", ctx.Repo.RepoLink, comment.ID), comment.Reactions, setting.UI.Reactions)
+ }
+ 
 diff --git a/routers/web/repo/issue_label.go b/routers/web/repo/issue_label.go
-index 5004b9d978..0cfd10b465 100644
+index ee4195e..2b37869 100644
 --- a/routers/web/repo/issue_label.go
 +++ b/routers/web/repo/issue_label.go
-@@ -226,5 +226,6 @@ func UpdateIssueLabel(ctx *context.Context) {
+@@ -238,5 +238,6 @@ func UpdateIssueLabel(ctx *context.Context) {
  		return
  	}
  
@@ -141,10 +120,10 @@ index 5004b9d978..0cfd10b465 100644
  }
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
 new file mode 100644
-index 0000000000..d054d962f9
+index 0000000..84eac13
 --- /dev/null
 +++ b/routers/web/repo/issue_live.go
-@@ -0,0 +1,678 @@
+@@ -0,0 +1,679 @@
 +// Copyright 2026 The Gitea Authors. All rights reserved.
 +// SPDX-License-Identifier: MIT
 +
@@ -282,6 +261,7 @@ index 0000000000..d054d962f9
 +
 +	ctx.Data["Issue"] = issue
 +	ctx.Data["IsAttachmentEnabled"] = setting.Attachment.Enabled
++	ctx.Data["AllowedIssueReactions"] = setting.UI.Reactions
 +	ctx.Data["IsIssuePoster"] = ctx.IsSigned && issue.IsPoster(ctx.Doer.ID)
 +	ctx.Data["HasIssuesOrPullsWritePermission"] = ctx.Repo.Permission.CanWriteIssuesOrPulls(issue.IsPull)
 +	ctx.Data["HasProjectsWritePermission"] = ctx.Repo.Permission.CanWrite(unit.TypeProjects)
@@ -825,7 +805,7 @@ index 0000000000..d054d962f9
 +}
 diff --git a/routers/web/repo/issue_live_hub.go b/routers/web/repo/issue_live_hub.go
 new file mode 100644
-index 0000000000..ea1b46756e
+index 0000000..ea1b467
 --- /dev/null
 +++ b/routers/web/repo/issue_live_hub.go
 @@ -0,0 +1,71 @@
@@ -902,7 +882,7 @@ index 0000000000..ea1b46756e
 +}
 diff --git a/routers/web/repo/issue_live_test.go b/routers/web/repo/issue_live_test.go
 new file mode 100644
-index 0000000000..445cec3a70
+index 0000000..445cec3
 --- /dev/null
 +++ b/routers/web/repo/issue_live_test.go
 @@ -0,0 +1,171 @@
@@ -1078,10 +1058,10 @@ index 0000000000..445cec3a70
 +	assert.Equal(t, "issuecomment-10", states[0].Key)
 +}
 diff --git a/routers/web/web.go b/routers/web/web.go
-index a3afe52e0c..130a311a43 100644
+index 0fa4c8b..435170b 100644
 --- a/routers/web/web.go
 +++ b/routers/web/web.go
-@@ -1321,6 +1321,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
+@@ -1320,6 +1320,7 @@ func registerWebRoutes(m *web.Router, webAuth *AuthMiddleware) {
  		m.Get("/posters", repo.IssuePullPosters)
  		m.Group("/{index}", func() {
  			m.Get("/info", repo.GetIssueInfo)
@@ -1090,10 +1070,10 @@ index a3afe52e0c..130a311a43 100644
  			m.Get("/attachments/{uuid}", repo.GetAttachment)
  			m.Group("/content-history", func() {
 diff --git a/templates/repo/issue/view_content.tmpl b/templates/repo/issue/view_content.tmpl
-index dbf2712e10..d83f24d5d2 100644
+index d040cc4..d83f24d 100644
 --- a/templates/repo/issue/view_content.tmpl
 +++ b/templates/repo/issue/view_content.tmpl
-@@ -1,69 +1,7 @@
+@@ -1,67 +1,7 @@
  <div class="issue-content">
 -	{{$createdStr:= DateUtils.TimeSince .Issue.CreatedUnix}}
  	<div class="issue-content-left">
@@ -1134,9 +1114,6 @@ index dbf2712e10..d83f24d5d2 100644
 -						</div>
 -						<div class="comment-header-right">
 -							{{template "repo/issue/view_content/show_role" dict "ShowRole" .Issue.ShowRole "IgnorePoster" true}}
--							{{if not $.Repository.IsArchived}}
--								{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
--							{{end}}
 -							{{template "repo/issue/view_content/context_menu" dict "ConvContentType" "issue_main" "ConvContentItem" .Issue}}
 -						</div>
 -					</div>
@@ -1154,10 +1131,11 @@ index dbf2712e10..d83f24d5d2 100644
 -							{{template "repo/issue/view_content/attachments" dict "Attachments" .Issue.Attachments "RenderedContent" .Issue.RenderedContent}}
 -						{{end}}
 -					</div>
--					{{$reactions := .Issue.Reactions.GroupByType}}
--					{{if $reactions}}
--						{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
--					{{end}}
+-					{{template "shared/reactions" dict
+-						"AllowedReactions" $.AllowedIssueReactions
+-						"ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)
+-						"Reactions" .Issue.Reactions.GroupByType
+-					}}
 -				</div>
 -			</div>
 +			{{template "repo/issue/view_content/issue_comment" .}}
@@ -1166,7 +1144,7 @@ index dbf2712e10..d83f24d5d2 100644
  			<div class="timeline-item tw-hidden" id="timeline-comments-end"></div>
 diff --git a/templates/repo/issue/view_content/comments_live.tmpl b/templates/repo/issue/view_content/comments_live.tmpl
 new file mode 100644
-index 0000000000..6b9a55fb2a
+index 0000000..6b9a55f
 --- /dev/null
 +++ b/templates/repo/issue/view_content/comments_live.tmpl
 @@ -0,0 +1,4 @@
@@ -1176,10 +1154,10 @@ index 0000000000..6b9a55fb2a
 +</div>
 diff --git a/templates/repo/issue/view_content/issue_comment.tmpl b/templates/repo/issue/view_content/issue_comment.tmpl
 new file mode 100644
-index 0000000000..2a8b74c80c
+index 0000000..9d07ed1
 --- /dev/null
 +++ b/templates/repo/issue/view_content/issue_comment.tmpl
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,61 @@
 +{{$createdStr:= DateUtils.TimeSince .Issue.CreatedUnix}}
 +<div id="{{.Issue.HashTag}}" class="timeline-item comment issue-content-comment">
 +	{{if .Issue.OriginalAuthor}}
@@ -1217,9 +1195,6 @@ index 0000000000..2a8b74c80c
 +			</div>
 +			<div class="comment-header-right">
 +				{{template "repo/issue/view_content/show_role" dict "ShowRole" .Issue.ShowRole "IgnorePoster" true}}
-+				{{if not $.Repository.IsArchived}}
-+					{{template "repo/issue/view_content/add_reaction" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)}}
-+				{{end}}
 +				{{template "repo/issue/view_content/context_menu" dict "ConvContentType" "issue_main" "ConvContentItem" .Issue}}
 +			</div>
 +		</div>
@@ -1237,38 +1212,36 @@ index 0000000000..2a8b74c80c
 +				{{template "repo/issue/view_content/attachments" dict "Attachments" .Issue.Attachments "RenderedContent" .Issue.RenderedContent}}
 +			{{end}}
 +		</div>
-+		{{$reactions := .Issue.Reactions.GroupByType}}
-+		{{if $reactions}}
-+			{{template "repo/issue/view_content/reactions" dict "ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index) "Reactions" $reactions}}
-+		{{end}}
++		{{template "shared/reactions" dict
++			"AllowedReactions" $.AllowedIssueReactions
++			"ActionURL" (printf "%s/issues/%d/reactions" $.RepoLink .Issue.Index)
++			"Reactions" .Issue.Reactions.GroupByType
++		}}
 +	</div>
 +</div>
 diff --git a/web_src/js/features/comp/ReactionSelector.ts b/web_src/js/features/comp/ReactionSelector.ts
-index efc592597a..2016a53c43 100644
+index d1e9537..ceadb24 100644
 --- a/web_src/js/features/comp/ReactionSelector.ts
 +++ b/web_src/js/features/comp/ReactionSelector.ts
-@@ -1,6 +1,8 @@
- import {POST} from '../../modules/fetch.ts';
- import {registerGlobalEventFunc} from '../../modules/observer.ts';
+@@ -3,6 +3,8 @@ import {registerGlobalEventFunc} from '../../modules/observer.ts';
+ import {createTippy} from '../../modules/tippy.ts';
+ import {createElementFromHTML} from '../../utils/dom.ts';
  
 +export const issueLiveRefreshEvent = 'gitea:issue-live-refresh';
 +
  export function initCompReactionSelector() {
-   registerGlobalEventFunc('click', 'onCommentReactionButtonClick', async (target: HTMLElement, e: Event) => {
-     // there are 2 places for the "reaction" buttons, one is the top-right reaction menu, one is the bottom of the comment
-@@ -26,5 +28,9 @@ export function initCompReactionSelector() {
-     if (data.html) {
-       commentContainer.insertAdjacentHTML('beforeend', data.html);
-     }
-+
-+    // Ask the page-owned socket to reconcile immediately. Other sessions are
-+    // invalidated by the server-side issue live hub.
+   registerGlobalEventFunc('click', 'onReactionPickerClick', (btn: HTMLElement) => {
+     if (btn._tippy) return;
+@@ -40,5 +42,6 @@ export function initCompReactionSelector() {
+     const newBottomReactions = createElementFromHTML(data.html);
+     bottomReactions.replaceWith(newBottomReactions);
+     if (hadFocus) newBottomReactions.querySelector<HTMLElement>('.select-reaction')?.focus();
 +    document.dispatchEvent(new CustomEvent(issueLiveRefreshEvent));
    });
  }
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
 new file mode 100644
-index 0000000000..e985b35cb8
+index 0000000..e985b35
 --- /dev/null
 +++ b/web_src/js/features/repo-issue-live.ts
 @@ -0,0 +1,631 @@
@@ -1904,7 +1877,7 @@ index 0000000000..e985b35cb8
 +  window.addEventListener('pageshow', () => socket.resume());
 +}
 diff --git a/web_src/js/index.ts b/web_src/js/index.ts
-index cf0d85e3fd..8d84b99ce1 100644
+index bc75b7b..a1744cb 100644
 --- a/web_src/js/index.ts
 +++ b/web_src/js/index.ts
 @@ -20,6 +20,7 @@ import {initMarkupContent} from './markup/content.ts';
@@ -1915,7 +1888,7 @@ index cf0d85e3fd..8d84b99ce1 100644
  import {initRepoEllipsisButton, initCommitStatuses, initAvatarStackPopup, initCommitFileHistoryFollowRename} from './features/repo-commit.ts';
  import {initRepoTopicBar} from './features/repo-home.ts';
  import {initAdminCommon} from './features/admin/common.ts';
-@@ -131,6 +132,7 @@ const initPerformanceTracer = callInitFunctions([
+@@ -135,6 +136,7 @@ const initPerformanceTracer = callInitFunctions([
    initRepoIssueContentHistory,
    initRepoIssueList,
    initRepoIssueFilterItemLabel,
@@ -1923,6 +1896,3 @@ index cf0d85e3fd..8d84b99ce1 100644
    initRepoMigration,
    initRepoMigrationStatusChecker,
    initRepoProjectsView,
--- 
-2.55.0
-
