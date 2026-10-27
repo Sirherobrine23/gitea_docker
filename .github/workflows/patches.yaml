@@ -45,7 +45,8 @@ jobs:
       matrix:
         include:
           - component: act
-            repository: Sirherobrine23/gitea-runner
+            repository: gitea/runner
+            repository_url: https://gitea.com/gitea/runner.git
             ref: main
           - component: gitea
             repository: go-gitea/gitea
@@ -59,6 +60,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REPO: ${{ matrix.repository }}
+          SOURCE_URL: ${{ matrix.repository_url || format('https://github.com/{0}.git', matrix.repository) }}
           SOURCE_REF: ${{ matrix.ref }}
           COMPONENT: ${{ matrix.component }}
         run: |
@@ -66,7 +68,7 @@ jobs:
           if [ "$ref" = release ]; then
             ref=$(gh api "repos/$SOURCE_REPO/releases/latest" --jq .tag_name)
           fi
-          git clone --depth 1 --branch "$ref" "https://github.com/$SOURCE_REPO.git" source
+          git clone --depth 1 --branch "$ref" "$SOURCE_URL" source
           sh patches/apply.sh "$PWD/source" "$PWD/patches/$COMPONENT" "$ref"
       - uses: actions/setup-go@v6
         with:

@@ -6,6 +6,8 @@
 # Flags global
 ARG ACT_TAG=latest
 ARG GITEA_TAG="main"
+ARG RUNNER_REPO="https://gitea.com/gitea/runner.git"
+ARG RUNNER_TAG="main"
 
 # Pull codes
 FROM --platform=$BUILDPLATFORM scratch AS gitea_code
@@ -13,7 +15,9 @@ ARG GITEA_TAG
 ADD --keep-git-dir=true https://github.com/go-gitea/gitea.git#${GITEA_TAG} /
 
 FROM --platform=$BUILDPLATFORM scratch AS runner_code
-ADD --keep-git-dir=true https://github.com/Sirherobrine23/gitea-runner.git#main /
+ARG RUNNER_REPO
+ARG RUNNER_TAG
+ADD --keep-git-dir=true ${RUNNER_REPO}#${RUNNER_TAG} /
 
 ## Base system to build
 FROM --platform=$BUILDPLATFORM node:24-bookworm-slim AS node_toolchain
@@ -42,6 +46,7 @@ EOF
 
 ### Gitea Runner
 FROM base_sys AS gitea_runner_base
+ARG RUNNER_TAG
 WORKDIR /build
 COPY --from=runner_code /go.mod /go.sum ./
 RUN go mod download
@@ -56,7 +61,7 @@ RUN git fetch --unshallow --tags && \
     echo "$LATEST_TAG+$COMMITS_AHEAD-g$COMMIT_HASH" | sed 's/^v//' > VERSION; \
   fi
 RUN --mount=type=bind,source=./patches/,target=/tmp/build-context \
-    sh /tmp/build-context/apply.sh /build /tmp/build-context/act main
+    sh /tmp/build-context/apply.sh /build /tmp/build-context/act "$RUNNER_TAG"
 RUN go mod tidy && go mod download
 # Build latest gitea runner file
 FROM --platform=$BUILDPLATFORM gitea_runner_base AS runner

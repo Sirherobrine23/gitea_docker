@@ -17,6 +17,11 @@ issue view and include reaction counts in their resume state.
 Build tools use the official Go 1.27.2 and Node 24 images on Debian Bookworm.
 This avoids linking the build's Node.js to libraries in Debian sid transitions.
 
+Runner sources come from the upstream `https://gitea.com/gitea/runner.git`
+repository, with the custom runner options patch applied during the build.
+The Gitea image also includes this runner. Set the `RUNNER_REPO` and
+`RUNNER_TAG` build arguments to select another repository or ref.
+
 `patches/apply.sh` applies patches in version order and stops on the first
 failure. For a release, an exact major/minor directory takes precedence over
 a major directory, followed by the root series. For example, `v1.27.2` selects
