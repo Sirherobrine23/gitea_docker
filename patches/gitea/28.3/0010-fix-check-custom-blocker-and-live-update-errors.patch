@@ -1,0 +1,118 @@
+Subject: [PATCH] fix: satisfy Gitea checks for blockers and live updates
+
+Handle configuration mapping and WebSocket close errors, use the project
+JSON module, and remove a redundant empty response write.
+
+Assisted-by: Codex:GPT-6
+---
+diff --git a/cmd/web.go b/cmd/web.go
+index c89e1f8..70d91fc 100644
+--- a/cmd/web.go
++++ b/cmd/web.go
+@@ -353,7 +353,6 @@ func listen(m http.Handler, handleRedirector bool) error {
+ 	m = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 		if setting.IsBlock(r) {
+ 			w.WriteHeader(http.StatusBadRequest)
+-			w.Write(nil)
+ 			return
+ 		}
+ 
+diff --git a/modules/setting/blockers.go b/modules/setting/blockers.go
+index fc0d3d6..b553428 100644
+--- a/modules/setting/blockers.go
++++ b/modules/setting/blockers.go
+@@ -5,7 +5,6 @@ package setting
+ 
+ import (
+ 	"context"
+-	"fmt"
+ 	stdlog "log"
+ 	"net/http"
+ 	"net/netip"
+@@ -18,6 +17,7 @@ import (
+ 
+ 	"gitea.dev/modules/json"
+ 	"gitea.dev/modules/log"
++
+ 	"sirherobrine23.com.br/Sirherobrine23/whois"
+ )
+ 
+@@ -99,7 +99,7 @@ func ProcessBlockConfig() {
+ 						isAddr := func(r rune) bool {
+ 							return !(unicode.IsNumber(r) || unicode.IsLetter(r) || r == ':' || r == '/' || r == '.')
+ 						}
+-						if response, err := whois.Query(ctx, "whois.radb.net", fmt.Sprintf("!g%s", query)); err == nil {
++						if response, err := whois.Query(ctx, "whois.radb.net", "!g"+query); err == nil {
+ 							for p := range strings.FieldsFuncSeq(response.Body, isAddr) {
+ 								if p != "" {
+ 									if cidr, err := netip.ParsePrefix(p); err == nil && cidr.IsValid() {
+@@ -110,7 +110,7 @@ func ProcessBlockConfig() {
+ 							}
+ 						}
+ 
+-						if response, err := whois.Query(context.Background(), "whois.ripe.net", fmt.Sprintf("-i origin %s", query)); err == nil {
++						if response, err := whois.Query(context.Background(), "whois.ripe.net", "-i origin "+query); err == nil {
+ 							for line := range strings.SplitSeq(response.Body, "\n") {
+ 								line = strings.TrimSpace(line)
+ 								if routev4, okv4 := strings.CutPrefix(line, "route:"); okv4 {
+@@ -169,7 +169,9 @@ func ProcessBlockConfig() {
+ func loadBlockConfig(rootCfg ConfigProvider) {
+ 	var BlockConfig BlockerConfig
+ 	sec := rootCfg.Section("block")
+-	sec.MapTo(&BlockConfig)
++	if err := sec.MapTo(&BlockConfig); err != nil {
++		log.Fatal("Failed to map blocker settings: %v", err)
++	}
+ 	BlockConfigs[0] = &BlockConfig
+ 
+ 	if sec.HasKey("CONFIG_FILE") {
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index 4b7833b..9966d70 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -7,9 +7,9 @@ import (
+ 	stdcontext "context"
+ 	"crypto/sha256"
+ 	"encoding/hex"
+-	"encoding/json"
+ 	"errors"
+ 	"fmt"
++	"slices"
+ 	"sort"
+ 	"strconv"
+ 	"strings"
+@@ -19,6 +19,7 @@ import (
+ 	"gitea.dev/models/unit"
+ 	user_model "gitea.dev/models/user"
+ 	"gitea.dev/modules/graceful"
++	"gitea.dev/modules/json"
+ 	"gitea.dev/modules/log"
+ 	"gitea.dev/modules/reqctx"
+ 	"gitea.dev/modules/setting"
+@@ -176,12 +177,7 @@ func issueLiveNodeAttribute(node *nethtml.Node, name string) string {
+ }
+ 
+ func issueLiveNodeHasClass(node *nethtml.Node, className string) bool {
+-	for _, current := range strings.Fields(issueLiveNodeAttribute(node, "class")) {
+-		if current == className {
+-			return true
+-		}
+-	}
+-	return false
++	return slices.Contains(strings.Fields(issueLiveNodeAttribute(node, "class")), className)
+ }
+ 
+ func issueLiveIsCommentKey(value string) bool {
+@@ -577,7 +573,11 @@ func IssueLive(ctx *context.Context) {
+ 		log.Warn("Unable to accept issue live WebSocket: %v", err)
+ 		return
+ 	}
+-	defer conn.CloseNow()
++	defer func() {
++		if err := conn.CloseNow(); err != nil {
++			log.Debug("Unable to close issue live WebSocket: %v", err)
++		}
++	}()
+ 	conn.SetReadLimit(issueLiveReadLimit)
+ 
+ 	clientStateList, initialized, err := issueLiveReadResume(connectionCtx, conn)

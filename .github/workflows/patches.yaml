@@ -19,7 +19,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        ref: [v28.1.0, v28.2.0, main]
+        ref: [v28.1.0, v28.2.0, v28.3.0, main]
     steps:
       - uses: actions/checkout@v6
       - name: Apply Gitea patch series
