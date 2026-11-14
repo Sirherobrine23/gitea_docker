@@ -662,12 +662,12 @@ index 0000000..84eac13
 +
 +	initialHTML, err := prepareIssueLiveSnapshot(ctx)
 +	if err != nil {
-+		ctx.ServerError("prepareIssueLiveSnapshot", err)
++		ctx.ServerErrorAuto(fmt.Errorf("prepareIssueLiveSnapshot: %w", err))
 +		return
 +	}
 +	initialEntries, err := issueLiveParseSnapshot(initialHTML)
 +	if err != nil {
-+		ctx.ServerError("issueLiveParseSnapshot", err)
++		ctx.ServerErrorAuto(fmt.Errorf("issueLiveParseSnapshot: %w", err))
 +		return
 +	}
 +	if ctx.Written() {
