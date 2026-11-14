@@ -201,7 +201,7 @@ index 0000000000..28bce69dd4
 +	publishPullRequestChanged(ctx, pr)
 +}
 +
-+func (n *wsNotifier) PullRequestChangeTargetBranch(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest, _ string) {
++func (n *wsNotifier) PullRequestChangeTargetBranch(ctx context.Context, _ *user_model.User, pr *issues_model.PullRequest, _, _ string) {
 +	publishPullRequestChanged(ctx, pr)
 +}
 +
