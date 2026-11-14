@@ -277,12 +277,12 @@ index 7e948e8930..c0009a40b9 100644
 -	issue.RenderedContent, err = markdown.RenderString(rctx, issue.Content)
 +	renderedContent, err := markdown.RenderString(rctx, issue.Content)
  	if err != nil {
--		ctx.ServerError("RenderString", err)
+-		ctx.ServerErrorAuto(err)
 -		return
 +		return fmt.Errorf("render issue content: %w", err)
  	}
 -	if issue.ShowRole, err = roleDescriptor(ctx, issue.Repo, issue.Poster, nil, issue, issue.HasOriginalAuthor()); err != nil {
--		ctx.ServerError("roleDescriptor", err)
+-		ctx.ServerErrorAuto(err)
 -		return
 +	showRole, err := roleDescriptor(ctx, issue.Repo, issue.Poster, nil, issue, issue.HasOriginalAuthor())
 +	if err != nil {
@@ -295,7 +295,7 @@ index 7e948e8930..c0009a40b9 100644
 +
 +func prepareIssueViewContent(ctx *context.Context, issue *issues_model.Issue) {
 +	if err := prepareIssueViewContentData(ctx, issue); err != nil {
-+		ctx.ServerError("prepareIssueViewContent", err)
++		ctx.ServerErrorAuto(err)
  	}
  }
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts

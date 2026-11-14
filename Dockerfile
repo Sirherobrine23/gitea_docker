@@ -200,6 +200,11 @@ esac
 pkgs="$pkgs docker.io docker-compose docker-cli iproute2 fuse-overlayfs slirp4netns"
 
 apt update
+# The act Ubuntu image can include moby-compose, which owns the same
+# plugin path as Ubuntu's docker-compose-v2 package.
+if dpkg-query -W -f='${Status}' moby-compose 2>/dev/null | grep -q "install ok installed"; then
+  apt remove -y moby-compose
+fi
 apt install -y $pkgs
 
 # Remove cache files
