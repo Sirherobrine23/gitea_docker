@@ -12,7 +12,10 @@ The root Gitea patches track upstream `main`. The `28` series retains the
 28.x releases' issue context menu API; the main series uses the newer
 `ConvContentType` and `ConvContentItem` arguments and the shared reaction
 template/picker. Live snapshots supply the same allowed reactions as the normal
-issue view and include reaction counts in their resume state.
+issue view and include reaction counts in their resume state. The `28.3` and
+`28.4` series use the upstream permission-aware comment filtering service;
+older 28.x releases retain their original helper. The main series uses the
+upstream `PullMergeBox` refresh method for live merge state updates.
 
 Build tools use the official Go 1.27.2 and Node 24 images on Debian Bookworm.
 This avoids linking the build's Node.js to libraries in Debian sid transitions.

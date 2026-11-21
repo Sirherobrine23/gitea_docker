@@ -66,7 +66,7 @@ index b716be2..429d958 100644
  		<span class="reaction">{{ReactionToEmoji $key}}</span>
 -		<span>{{len $value}}</span>
 +		<span class="reaction-count">{{len $value}}</span>
- 	</a>
+ 	</button>
  {{end}}
  </div>
 diff --git a/web_src/js/features/repo-issue-live.ts b/web_src/js/features/repo-issue-live.ts
