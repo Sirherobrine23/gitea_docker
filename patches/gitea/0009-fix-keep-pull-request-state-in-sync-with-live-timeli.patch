@@ -12,13 +12,13 @@ timeline changes so a merged pull request doesn't keep offering to merge.
 Assisted-by: Claude Code:claude-opus-5-5
 Signed-off-by: Matheus Sampaio Queiroga <srherobrine20@gmail.com>
 ---
- routers/web/repo/issue_live.go                |  5 +++
- routers/web/web.go                            |  2 +-
- .../issue/view_content/pull_merge_box.tmpl    |  2 +-
- web_src/js/features/repo-issue-content.ts     |  6 ++--
- web_src/js/features/repo-issue-live.ts        |  8 +++++
- web_src/js/features/repo-issue-pull.ts        | 35 +++++++++++--------
- 6 files changed, 39 insertions(+), 19 deletions(-)
+ routers/web/repo/issue_live.go                     |    5 +++++
+ routers/web/web.go                                 |    2 +-
+ .../repo/issue/view_content/pull_merge_box.tmpl    |    2 +-
+ web_src/js/features/repo-issue-content.ts          |    6 ++++--
+ web_src/js/features/repo-issue-live.ts             |    8 ++++++++
+ web_src/js/features/repo-issue-pull.ts             |    7 +++++--
+ 6 files changed, 24 insertions(+), 6 deletions(-)
 
 diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
 index b702a483d9..4b7833b757 100644
@@ -50,20 +50,19 @@ index 130a311a43..3db138f026 100644
  			m.Get("/attachments/{uuid}", repo.GetAttachment)
  			m.Group("/content-history", func() {
 diff --git a/templates/repo/issue/view_content/pull_merge_box.tmpl b/templates/repo/issue/view_content/pull_merge_box.tmpl
-index ab3d4b9ac5..f99d672dfc 100644
 --- a/templates/repo/issue/view_content/pull_merge_box.tmpl
 +++ b/templates/repo/issue/view_content/pull_merge_box.tmpl
 @@ -2,9 +2,9 @@
- {{if $data.ShowMergeBox}}
+ {{$issue := $.Issue}}
  <div class="timeline-item comment pull-merge-box"
  	data-global-init="initRepoPullMergeBox"
-+	data-pull-link="{{$.Issue.Link}}"
- 	{{if $data.ReloadingInterval}}
- 		data-pull-merge-box-reloading-interval="{{$data.ReloadingInterval}}"
--		data-pull-link="{{$.Issue.Link}}"
++	data-pull-link="{{$issue.Link}}"
+ 	{{if $mergeBoxData.ReloadingInterval}}
+ 		data-pull-merge-box-reloading-interval="{{$mergeBoxData.ReloadingInterval}}"
+-		data-pull-link="{{$issue.Link}}"
  	{{end}}
  >
- 	<div class="timeline-avatar {{$data.TimelineIconClass}}">{{svg "octicon-git-merge" 40}}</div>
+ 	<div class="timeline-avatar merge-box-icon{{if $issue.PullRequest.HasMerged}} tw-bg-purple{{else if $mergeBoxData.IsMergeStateClean}} tw-bg-green{{end}}">{{svg "octicon-git-merge" 24}}</div>
 diff --git a/web_src/js/features/repo-issue-content.ts b/web_src/js/features/repo-issue-content.ts
 index 5194f8802f..0da9f0d048 100644
 --- a/web_src/js/features/repo-issue-content.ts
@@ -127,61 +126,40 @@ index 0260746c10..3645bb04b9 100644
  }
  
 diff --git a/web_src/js/features/repo-issue-pull.ts b/web_src/js/features/repo-issue-pull.ts
-index ac30342909..1ca570ab1b 100644
 --- a/web_src/js/features/repo-issue-pull.ts
 +++ b/web_src/js/features/repo-issue-pull.ts
-@@ -36,6 +36,8 @@ async function initRepoPullRequestMergeForm(box: HTMLElement) {
-   view.mount(el); // TODO: can unmount when reloaded?
- }
- 
-+export const pullMergeBoxReloadEvent = 'gitea-pull-merge-box-reload';
+@@ -2,6 +2,8 @@
+ import {GET} from '../modules/fetch.ts';
+ import {createTippy, getAttachedTippyInstance} from '../modules/tippy.ts';
+ import {addDelegatedEventListener, createElementFromHTML, activePageTimerRefresh} from '../utils/dom.ts';
 +
- function initRepoPullMergeBoxRefresh(el: Element) {
-   // The merge box has complex buttons & form, if the user has interacted with any element, don't refresh.
-   // Otherwise, the user won't be able to merge or schedule a merge (auto-merge) when the PR status is not ready.
-@@ -45,24 +47,27 @@ function initRepoPullMergeBoxRefresh(el: Element) {
-     el.addEventListener(event, () => { interacted = true }, {capture: true});
++export const pullMergeBoxReloadEvent = 'gitea-pull-merge-box-reload';
+ 
+ const reloadingIntervalAttr = 'data-pull-merge-box-reloading-interval';
+ 
+@@ -21,6 +23,7 @@
+     addDelegatedEventListener(this.el, 'click', '[data-kind]', (toggle) => {
+       toggle.setAttribute('aria-expanded', String(toggle.getAttribute('aria-expanded') !== 'true'));
+     });
++    this.el.addEventListener(pullMergeBoxReloadEvent, () => { void this.refresh() });
+     await this.initContent();
+     activePageTimerRefresh({
+       interval: () => this.el.isConnected ? Number(this.el.getAttribute(reloadingIntervalAttr)) : 0,
+@@ -77,12 +80,12 @@
    }
  
-+  const reload = async () => {
-+    if (interacted || !el.isConnected) return;
-+    const pullLink = el.getAttribute('data-pull-link')!;
-+    const resp = await GET(`${pullLink}/merge_box`);
-+    if (!resp.ok) return;
-+    const respText = (await resp.text()).trim();
-+    if (!respText) {
-+      el.remove(); // merge box might not exist if the PR has changed (e.g.: merged and the head branch has been deleted)
-+      return;
-+    }
-+    const newEl = createElementFromHTML(respText);
-+    const scrollTop = el.querySelector<HTMLElement>('.commit-status-list')?.scrollTop;
-+    el.replaceWith(newEl); // don't morph, do full replacement to make sure data-global-init and Vue components are re-initialized
-+    if (scrollTop) newEl.querySelector<HTMLElement>('.commit-status-list')?.scrollTo({top: scrollTop, behavior: 'instant'});
-+  };
-+  el.addEventListener(pullMergeBoxReloadEvent, reload);
-+
-   activePageTimerRefresh({
-     once: true, // on successful refresh, the data-global-init will re-initialize the element
-     interval: () => interacted ? 0 : Number(el.getAttribute('data-pull-merge-box-reloading-interval')),
--    async callback() {
--      if (interacted) return;
--      const pullLink = el.getAttribute('data-pull-link')!;
--      const resp = await GET(`${pullLink}/merge_box`);
--      if (!resp.ok) return;
--      const respText = (await resp.text()).trim();
--      if (!respText) {
--        el.remove(); // merge box might not exist if the PR has changed (e.g.: merged and the head branch has been deleted)
--        return;
--      }
--      const newEl = createElementFromHTML(respText);
--      const scrollTop = el.querySelector<HTMLElement>('.commit-status-list')?.scrollTop;
--      el.replaceWith(newEl); // don't morph, do full replacement to make sure data-global-init and Vue components are re-initialized
--      if (scrollTop) newEl.querySelector<HTMLElement>('.commit-status-list')?.scrollTo({top: scrollTop, behavior: 'instant'});
--    },
-+    callback: reload,
-   });
- }
- 
+   private async refresh() {
+-    if (this.isBusy()) return;
++    if (!this.el.isConnected || this.isBusy()) return;
+     const pullLink = this.el.getAttribute('data-pull-link')!;
+     const resp = await GET(`${pullLink}/merge_box`);
+     if (!resp.ok) return;
+     const respText = (await resp.text()).trim();
+-    if (this.isBusy()) return;
++    if (!this.el.isConnected || this.isBusy()) return;
+     const newEl = createElementFromHTML(respText);
+     const newToggles = new Map([...newEl.querySelectorAll<HTMLElement>('[data-kind]')].map((toggle) => [toggle.getAttribute('data-kind'), toggle]));
+     let focusedToggle: HTMLElement | undefined;
 -- 
 2.55.0
 

@@ -1,0 +1,36 @@
+From 76a14e598a8a5fe3423ddd401ee6f0ff1d3fe82a Mon Sep 17 00:00:00 2001
+From: Codex <codex@openai.com>
+Date: Fri, 30 Oct 2026 19:09:52 -0700
+Subject: [PATCH] fix: use upstream comment filtering for live issue snapshots
+
+Replace the removed filterXRefComments helper with the same FilterReadableComments service used by the normal issue view. Pass the current user and repository permissions and keep the returned filtered list.
+
+Assisted-by: Codex:GPT-6
+---
+ routers/web/repo/issue_live.go | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/routers/web/repo/issue_live.go b/routers/web/repo/issue_live.go
+index 23aff12..73858ab 100644
+--- a/routers/web/repo/issue_live.go
++++ b/routers/web/repo/issue_live.go
+@@ -25,6 +25,7 @@ import (
+ 	"gitea.dev/modules/setting"
+ 	"gitea.dev/modules/templates"
+ 	"gitea.dev/services/context"
++	issue_service "gitea.dev/services/issue"
+ 	user_service "gitea.dev/services/user"
+ 
+ 	"github.com/coder/websocket"
+@@ -130,7 +131,7 @@ func prepareIssueLiveSnapshot(ctx *context.Context) (string, error) {
+ 	if err := issue.LoadAttributes(ctx); err != nil {
+ 		return "", err
+ 	}
+-	if err := filterXRefComments(ctx, issue); err != nil {
++	if issue.Comments, err = issue_service.FilterReadableComments(ctx, ctx.Doer, ctx.Repo.Permission, issue, issue.Comments); err != nil {
+ 		return "", err
+ 	}
+ 	// The issue/PR description is the first timeline entry. It must be prepared
+-- 
+2.51.1
+

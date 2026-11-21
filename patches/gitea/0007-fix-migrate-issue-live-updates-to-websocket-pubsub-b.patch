@@ -264,8 +264,8 @@ diff --git a/routers/web/repo/issue_view.go b/routers/web/repo/issue_view.go
 index 7e948e8930..c0009a40b9 100644
 --- a/routers/web/repo/issue_view.go
 +++ b/routers/web/repo/issue_view.go
-@@ -1078,18 +1078,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
- 	}
+@@ -1075,18 +1075,25 @@ func (prInfo *pullRequestViewInfo) prepareMergeBoxProtectedRules(ctx *context.Co
+ 	data.ReviewSection = review
  }
  
 -func prepareIssueViewContent(ctx *context.Context, issue *issues_model.Issue) {
