@@ -129,7 +129,7 @@ index 163c81f..b29345d 100644
  
  // resolveLabels picks the labels to run with: --labels/GITEA_RUNNER_LABELS > config > .runner.
 diff --git a/internal/app/cmd/register.go b/internal/app/cmd/register.go
-index 6c1ad10..939212b 100644
+index b11d58b..8f72399 100644
 --- a/internal/app/cmd/register.go
 +++ b/internal/app/cmd/register.go
 @@ -63,13 +63,15 @@ func runRegister(ctx context.Context, regArgs *registerArgs, configFile *string)
@@ -155,52 +155,16 @@ index 6c1ad10..939212b 100644
  }
  
  type registerStage int8
-@@ -94,11 +96,13 @@ var defaultLabels = []string{
- }
- 
- type registerInputs struct {
--	InstanceAddr string
--	Token        string
--	RunnerName   string
--	Labels       []string
--	Ephemeral    bool
-+	InstanceAddr      string
-+	Token             string
-+	RunnerName        string
-+	CacheServer       string
-+	CacheServerSecret string
-+	Labels            []string
-+	Ephemeral         bool
- }
- 
- func (r *registerInputs) validate() error {
-@@ -210,10 +214,12 @@ func initInputs(regArgs *registerArgs) (*registerInputs, error) {
- 		}
- 	}
- 	inputs := &registerInputs{
--		InstanceAddr: strings.TrimSpace(regArgs.InstanceAddr),
--		Token:        strings.TrimSpace(token),
--		RunnerName:   strings.TrimSpace(regArgs.RunnerName),
--		Ephemeral:    regArgs.Ephemeral,
-+		InstanceAddr:      strings.TrimSpace(regArgs.InstanceAddr),
-+		Token:             strings.TrimSpace(token),
-+		RunnerName:        strings.TrimSpace(regArgs.RunnerName),
-+		Ephemeral:         regArgs.Ephemeral,
-+		CacheServer:       regArgs.CacheServer,
-+		CacheServerSecret: regArgs.CacheServerToken,
- 	}
- 	regArgs.Labels = strings.TrimSpace(regArgs.Labels)
- 	// command line flag.
-@@ -319,6 +325,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
+@@ -318,6 +320,14 @@ func registerNoInteractive(ctx context.Context, configFile string, regArgs *regi
  		logging.WithError(err).Errorf("Invalid input, please re-run act command.")
  		return err
  	}
 +
-+	// Add cache server configuration to registration, if specified in command line arguments, it will override the configuration in config file
-+	if inputs.CacheServer != "" {
++	// An explicit cache server flag overrides the cache configuration.
++	if regArgs.CacheServer != "" {
 +		cfg.Cache.Enabled = new(true)
-+		cfg.Cache.ExternalServer = inputs.CacheServer
-+		cfg.Cache.ExternalSecret = inputs.CacheServerSecret
++		cfg.Cache.ExternalServer = regArgs.CacheServer
++		cfg.Cache.ExternalSecret = regArgs.CacheServerToken
 +	}
 +
  	if err := doRegister(ctx, cfg, inputs); err != nil {
